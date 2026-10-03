@@ -1,0 +1,16 @@
+{
+  "name": "elysium-market-readiness-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node dev-server.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node build.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "preview": "node preview-server.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}
