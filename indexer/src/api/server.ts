@@ -12,14 +12,17 @@ import {
   upsertMarketAssessment,
 } from '../assessment/assessment-engine.js';
 import {
-  computeAssessmentHash,
-  computeAssessmentId,
-  serializeCanonicalAssessment,
-  verifyCanonicalAssessment,
   CURRENT_METHODOLOGY_VERSION,
   CURRENT_SCHEMA_VERSION,
 } from '../assessment/canonical.js';
-import type { CanonicalAssessmentPayload, MarketStatus } from '../assessment/types.js';
+import {
+  attestAssessment,
+  verifyAssessment,
+  AssessmentInsufficientDataError,
+  AssessmentNotFoundError,
+  AttestationConfigError,
+  CanonicalVerificationError,
+} from '../attestation/attestation-service.js';
 import { logger } from '../logger.js';
 
 export interface ServerOptions {
@@ -33,7 +36,7 @@ function sendJson(res: ServerResponse, statusCode: number, data: unknown): void 
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(json),
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end(json);
@@ -44,7 +47,7 @@ function sendError(res: ServerResponse, statusCode: number, message: string): vo
 }
 
 /**
- * Handles incoming HTTP requests for Phase 3A API.
+ * Handles incoming HTTP requests for Phase 3A & 3B API.
  */
 export async function handleRequest(
   pool: Queryable,
@@ -54,14 +57,14 @@ export async function handleRequest(
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     });
     res.end();
     return;
   }
 
-  if (req.method !== 'GET') {
+  if (req.method !== 'GET' && req.method !== 'POST') {
     sendError(res, 405, 'Method Not Allowed');
     return;
   }
@@ -237,9 +240,55 @@ export async function handleRequest(
       return;
     }
 
+    // Route: POST /v1/assessments/:assessmentId/attest
+    const attestMatch = /^\/v1\/assessments\/([^/]+)\/attest\/?$/.exec(pathname);
+    if (attestMatch) {
+      if (req.method !== 'POST') {
+        sendError(res, 405, 'Method Not Allowed');
+        return;
+      }
+
+      const rawAssessmentId = attestMatch[1]!;
+      if (!/^0x[0-9a-fA-F]{64}$/.test(rawAssessmentId)) {
+        sendError(res, 400, `Invalid assessment ID format: ${rawAssessmentId}`);
+        return;
+      }
+
+      try {
+        const result = await attestAssessment(pool, rawAssessmentId);
+        sendJson(res, 200, result);
+        return;
+      } catch (err: unknown) {
+        if (err instanceof AssessmentNotFoundError) {
+          sendError(res, 404, err.message);
+          return;
+        }
+        if (err instanceof AssessmentInsufficientDataError) {
+          sendError(res, 422, err.message);
+          return;
+        }
+        if (err instanceof CanonicalVerificationError) {
+          sendError(res, 422, err.message);
+          return;
+        }
+        if (err instanceof AttestationConfigError) {
+          sendError(res, 503, err.message);
+          return;
+        }
+        logger.error('attestation failed', { error: err });
+        sendError(res, 500, 'Attestation failed');
+        return;
+      }
+    }
+
     // Route: GET /v1/assessments/:assessmentId/verify
     const verifyMatch = /^\/v1\/assessments\/([^/]+)\/verify\/?$/.exec(pathname);
     if (verifyMatch) {
+      if (req.method !== 'GET') {
+        sendError(res, 405, 'Method Not Allowed');
+        return;
+      }
+
       const assessmentId = verifyMatch[1]!;
 
       // Validate assessmentId format (0x followed by 64 hex characters)
@@ -248,81 +297,19 @@ export async function handleRequest(
         return;
       }
 
-      const rowRes = await pool.query<{
-        token_address: string;
-        assessment_date: string;
-        health_score: string;
-        status: string;
-        momentum: string;
-        holder_health: string;
-        transfer_activity: string;
-        address_activity: string;
-        concentration_score: string;
-        consistency_score: string;
-        data_window_days: number;
-        assessment_id: string;
-        schema_version: string;
-        methodology_version: string;
-        assessment_hash: string;
-      }>(
-        `SELECT
-           token_address,
-           assessment_date::text as assessment_date,
-           health_score,
-           status,
-           momentum,
-           holder_health,
-           transfer_activity,
-           address_activity,
-           concentration_score,
-           consistency_score,
-           data_window_days,
-           assessment_id,
-           schema_version,
-           methodology_version,
-           assessment_hash
-         FROM market_assessments
-         WHERE LOWER(assessment_id) = LOWER($1)
-         LIMIT 1`,
-        [assessmentId],
-      );
-
-      if (rowRes.rows.length === 0) {
-        sendError(res, 404, `Assessment with ID ${assessmentId} not found`);
+      try {
+        const verification = await verifyAssessment(pool, assessmentId);
+        sendJson(res, 200, verification);
+        return;
+      } catch (err: unknown) {
+        if (err instanceof AssessmentNotFoundError) {
+          sendError(res, 404, err.message);
+          return;
+        }
+        logger.error('verification failed', { error: err });
+        sendError(res, 500, 'Verification failed');
         return;
       }
-
-      const row = rowRes.rows[0]!;
-
-      const payload: CanonicalAssessmentPayload = {
-        schema_version: (row.schema_version ?? CURRENT_SCHEMA_VERSION) as '1.0',
-        methodology_version: (row.methodology_version ?? CURRENT_METHODOLOGY_VERSION) as 'health-v1',
-        token_address: row.token_address.toLowerCase(),
-        assessment_date: row.assessment_date,
-        health_score: Number(row.health_score),
-        momentum: Number(row.momentum),
-        status: row.status as MarketStatus,
-        holder_health: Number(row.holder_health),
-        transfer_activity: Number(row.transfer_activity),
-        address_activity: Number(row.address_activity),
-        concentration_score: Number(row.concentration_score),
-        consistency_score: Number(row.consistency_score),
-        data_window_days: Number(row.data_window_days),
-      };
-
-      const verification = verifyCanonicalAssessment(
-        payload,
-        row.assessment_id,
-        row.assessment_hash,
-      );
-
-      sendJson(res, 200, {
-        assessment_id: row.assessment_id,
-        valid: verification.valid,
-        assessment_hash: verification.computedHash,
-        methodology_version: payload.methodology_version,
-      });
-      return;
     }
 
     sendError(res, 404, 'Endpoint not found');

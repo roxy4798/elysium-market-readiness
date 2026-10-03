@@ -179,7 +179,7 @@ async function cmdDoctor(config: IndexerConfig): Promise<number> {
       const tablesOk = await check('Required tables exist', async () => {
         const missing = await store.missingTables();
         if (missing.length > 0) throw new Error(`missing: ${missing.join(', ')} — run npm run migrate`);
-        return 'tokens, transfers, balances, indexer_state';
+        return 'tokens, transfers, balances, indexer_state, daily_metrics, market_assessments, assessment_attestations';
       });
       if (tablesOk) {
         await check('Checkpoint', async () => {
@@ -515,6 +515,7 @@ Options:
     console.log(`API server listening at http://localhost:${actualPort}`);
     console.log('Endpoints:');
     console.log('  GET /v1/tokens/:address/assessment?date=YYYY-MM-DD');
+    console.log('  POST /v1/assessments/:assessmentId/attest');
     console.log('  GET /v1/assessments/:assessmentId/verify');
     console.log('  GET /health');
 
@@ -528,6 +529,56 @@ Options:
     });
 
     return 0;
+  } finally {
+    await store.close();
+  }
+}
+
+async function cmdAttest(config: IndexerConfig): Promise<number> {
+  const argv = process.argv.slice(3);
+  let assessmentId: string | undefined;
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if ((a === '--id' || a === '-i') && argv[i + 1]) assessmentId = argv[++i];
+    else if (a === '--help' || a === '-h') {
+      console.log(`
+Usage: npm run attest [options]
+
+Options:
+  --id, -i <assessmentId>  Assessment ID (0x followed by 64 hex characters)
+  --help, -h               Show this help message
+`);
+      return 0;
+    }
+  }
+
+  if (!assessmentId) {
+    logger.error('missing required --id parameter');
+    return 2;
+  }
+
+  const store = await connectDatabase(config);
+  try {
+    const { attestAssessment } = await import('./attestation/attestation-service.js');
+    const res = await attestAssessment(store.pool, assessmentId);
+    console.log([
+      RULE,
+      'ASSESSMENT ONCHAIN ATTESTATION',
+      RULE,
+      `Assessment ID:    ${res.assessment_id}`,
+      `Contract Address: ${res.contract_address}`,
+      `Chain ID:         ${res.chain_id}`,
+      `Tx Hash:          ${res.transaction_hash}`,
+      `Block Number:     ${res.block_number}`,
+      `Attester:         ${res.attester}`,
+      `Assessment Hash:  ${res.assessment_hash}`,
+      RULE,
+    ].join('\n'));
+    return 0;
+  } catch (err: unknown) {
+    logger.error(err instanceof Error ? err.message : String(err));
+    return 1;
   } finally {
     await store.close();
   }
@@ -560,8 +611,10 @@ async function main(): Promise<number> {
       return cmdAssess(config);
     case 'serve':
       return cmdServe(config);
+    case 'attest':
+      return cmdAttest(config);
     default:
-      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics | assess | serve)`);
+      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics | assess | serve | attest)`);
       return 2;
   }
 }

@@ -1,0 +1,14 @@
+{
+  "name": "elysium-market-readiness-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:elysium": "hardhat run scripts/deploy.js --network elysiumTestnet"
+  },
+  "devDependencies": {
+    "hardhat": "^3.18.1"
+  }
+}

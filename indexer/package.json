@@ -15,6 +15,7 @@
     "doctor": "tsx src/main.ts doctor",
     "metrics": "tsx src/main.ts metrics",
     "assess": "tsx src/main.ts assess",
+    "attest": "tsx src/main.ts attest",
     "serve": "tsx src/main.ts serve",
     "test": "vitest run",
     "lint": "eslint .",

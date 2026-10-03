@@ -19,6 +19,7 @@
 - **Phase 2A**: Raw Market Metrics Engine (COMPLETE)
 - **Phase 2B**: Market Health Score V1 & Market Momentum Assessment Engine (COMPLETE)
 - **Phase 3A**: Canonical Assessment & Verification API (COMPLETE)
+- **Phase 3B**: Attestation implementation complete; Elysium Testnet deployment pending
 
 ### Core Capabilities:
 - **Testnet RPC Connectivity**: Connects directly to **Elysium Testnet** (`Chain ID: 99801`, gas token `HYPE`).
@@ -27,7 +28,8 @@
 - **Deterministic Raw Metrics Engine**: Converts indexed transfers and balances into daily raw market metrics with zero estimates and zero synthetic data.
 - **Deterministic Assessment Engine (Phase 2B)**: Computes Market Health Score (0–100), Market Momentum (-100 to +100), and categorical Status (`EARLY`, `BUILDING`, `DEVELOPING`, `MATURE`, `READY`) with zero future lookahead.
 - **Canonical Verification & REST API (Phase 3A)**: Constructs deterministic canonical assessment payloads, computes unique `keccak256` assessment IDs and `SHA-256` integrity hashes, and serves REST API verification endpoints.
-- **Idempotent PostgreSQL Storage**: Atomic transactional persistence with conflict handling on `transfers`, `daily_metrics`, and `market_assessments`.
+- **Onchain Assessment Attestation (Phase 3B)**: Minimal immutable Solidity registry implementation; live Elysium Testnet recording remains pending deployment.
+- **Idempotent PostgreSQL Storage**: Atomic transactional persistence with conflict handling on `transfers`, `daily_metrics`, `market_assessments`, and `assessment_attestations`.
 - **Fault-Tolerant Checkpointing**: Durable checkpoint tracking in PostgreSQL allowing clean stop/resume cycles without gaps or re-indexing.
 
 ---
@@ -508,14 +510,169 @@ npm run serve -- --port 3000
 
 ### 6. Explicit Scope Statement & Non-Claims
 > [!IMPORTANT]
-> - **Not Blockchain Attestation Yet**: Phase 3A establishes offchain canonical serialization, deterministic identity, and HTTP verification. Smart contract onchain attestation is slated for subsequent phases.
+> - **Cryptographic Proof, Not Valuation**: Phase 3A establishes offchain canonical serialization, deterministic identity, and HTTP verification.
 > - **Independent Project**: This software is an independent submission and is **NOT** an official Ascend or Elysium product.
 > - **No Endorsement or Quality Guarantee**: Health Scores, Momentums, and Hashes do **NOT** constitute an official Ascend ranking, endorsement, or approval.
 > - **No Financial Claims**: The system does **NOT** predict token prices or recommend investments.
 
 ---
 
-## 9. Known RPC Rate-Limit Limitation & Resilience
+## 9. Phase 3B — Onchain Assessment Attestation
+
+Phase 3B implements a minimal, immutable smart contract intended for **Elysium Testnet (Chain ID: 99801)**. Deployment is pending; no live attestation is claimed until a real contract address is configured and queried.
+
+### 1. Architecture Flow
+```text
+Indexer (Elysium Testnet Blocks 0 → Head)
+       │
+       ▼
+Daily Metrics Engine (24h UTC Calendar Aggregation)
+       │
+       ▼
+Assessment Engine (Deterministic Scoring V1)
+       │
+       ▼
+Canonical Assessment (Strict 13-field fixed JSON)
+       │
+       ▼
+SHA-256 Hash & Keccak-256 Assessment ID
+       │
+       ▼
+Attestation Service (Backend Transaction Manager)
+       │
+       ▼
+Deployed Contract (pending Elysium Testnet deployment)
+       │
+       ▼
+Onchain Attestation Registry
+       │
+       ▼
+Verification API (Dual Offchain & Onchain Verification)
+```
+
+### 2. Smart Contract Purpose & Design
+- **Contract Name**: `ElysiumAssessmentAttestation`
+- **Compiler**: Solidity `^0.8.28` (EVM target: `paris`, 200 optimizer runs)
+- **Target Network**: Elysium Testnet (`Chain ID: 99801`, RPC: `https://testnet-rpc.elysium.kinetiq.xyz`)
+- **Immutability & Safety**:
+  - Non-upgradeable (no proxies, no admin backdoor to rewrite past attestations).
+  - No external calls (purely passive onchain registry).
+  - Contains **zero scoring logic** (computation remains offchain in the deterministic backend engine).
+  - Idempotent: re-attesting identical data returns cleanly without re-writing or overwriting original timestamp/attester. Re-attesting conflicting data reverts with custom error `AssessmentAlreadyAttestedWithDifferentData(assessmentId)`.
+
+### 3. What is Stored Onchain vs. What Remains Offchain
+
+| Layer | Data Elements Stored | Rationale |
+|---|---|---|
+| **Onchain** (`ElysiumAssessmentAttestation`) | - `assessmentId` (`bytes32` Keccak-256)<br>- `assessmentHash` (`bytes32` SHA-256)<br>- `token` (`address`)<br>- `assessmentDate` (`uint64` UTC midnight timestamp)<br>- `methodologyVersion` (`bytes32` e.g. "health-v1")<br>- `attester` (`address`)<br>- `attestedAt` (`uint64` block timestamp) | Stores only minimal proof of canonical existence. Zero storage bloat, cost-effective, deterministic. |
+| **Offchain** (PostgreSQL & REST API) | - Full canonical assessment JSON<br>- Detailed health component scores (holder health, transfer/address activity, concentration, consistency)<br>- Daily aggregate metrics (holders, transfers, senders, receivers, top concentrations)<br>- Raw transfer logs & holder balances<br>- Scoring formulas and evaluation algorithms | The backend remains the source of truth for computation and detailed inspection. |
+
+### 4. Smart Contract Interface & ABI
+```solidity
+interface IElysiumAssessmentAttestation {
+    function attestAssessment(
+        bytes32 assessmentId,
+        bytes32 assessmentHash,
+        address token,
+        uint64 assessmentDate,
+        bytes32 methodologyVersion
+    ) external;
+
+    function getAttestation(bytes32 assessmentId)
+        external
+        view
+        returns (
+            bytes32 assessmentHash,
+            address token,
+            uint64 assessmentDate,
+            bytes32 methodologyVersion,
+            address attester,
+            uint64 attestedAt
+        );
+
+    function isAttested(bytes32 assessmentId) external view returns (bool);
+
+    event AssessmentAttested(
+        bytes32 indexed assessmentId,
+        bytes32 indexed assessmentHash,
+        address indexed token,
+        uint64 assessmentDate,
+        bytes32 methodologyVersion,
+        address attester
+    );
+}
+```
+
+### 5. Deterministic Representation Standards
+- **Assessment ID**: Deterministic Keccak-256 hash passed as `bytes32`.
+- **Assessment Hash**: Canonical SHA-256 hexadecimal string converted deterministically into `bytes32` without re-hashing.
+- **Assessment Date**: UTC calendar date `YYYY-MM-DD` converted deterministically to UTC midnight Unix timestamp in seconds (`uint64`). Example: `"2026-09-22"` $\to$ `1790035200`. Zero timezone dependency.
+- **Methodology Version**: String (e.g. `"health-v1"`) packed into right-zero-padded `bytes32`. Preserves original version string without hardcoding.
+
+### 6. Dual-Layer Verification Flow
+The verification API (`GET /v1/assessments/:assessmentId/verify`) verifies both offchain integrity and onchain attestation:
+1. **Offchain Verification**: Reconstructs canonical assessment from database, recomputes Keccak-256 `assessment_id` and SHA-256 `assessment_hash`, and confirms cryptographic integrity (`canonical_valid`).
+2. **Onchain Verification**: When `ATTESTATION_CONTRACT_ADDRESS` is configured, queries that contract via RPC (`isAttested` & `getAttestation`) and compares its stored values with the recomputed canonical assessment. Without a configured address, the API returns `onchain_attested: false`, `onchain_data_matches: false`, and `onchain: { configured: false }`. Unit tests use an in-memory mock and do not establish that a testnet contract is deployed.
+
+*Example response while deployment is pending:*
+```json
+{
+  "valid": true,
+  "canonical_valid": true,
+  "onchain_attested": false,
+  "onchain_data_matches": false,
+  "onchain": { "configured": false }
+}
+```
+
+### 7. Environment Configuration & Security
+
+Configure in `.env`:
+```bash
+# Deployed ElysiumAssessmentAttestation contract address on Elysium Testnet
+ATTESTATION_CONTRACT_ADDRESS=
+
+# Funded testnet attester private key (REQUIRED for submitting onchain attestations)
+ATTESTER_PRIVATE_KEY=
+```
+
+#### Security Guardrails:
+- **Never Commit Secrets**: `.env` is explicitly ignored by `.gitignore`.
+- **Zero Secret Exposure**: The private key is never logged to stdout/stderr, never returned in API responses, and never exposed in error traces.
+- **Fail-Safe Missing Configuration**: If attestation is attempted without `ATTESTER_PRIVATE_KEY` or `ATTESTATION_CONTRACT_ADDRESS`, the system returns a sanitized HTTP 503 error (`AttestationConfigError`) rather than crashing or leaking credentials.
+
+### 8. Manual Attestation Usage
+
+Phase 3B supports explicit/manual attestation via HTTP API or CLI:
+
+#### Via REST API:
+```bash
+POST /v1/assessments/0x2cdabbc86a34c27890a226afda3decfe8bc19f88797651a9e57ff8fb62f9077f/attest
+```
+The API returns transaction and block metadata only after a real transaction receipt is received. If an assessment is already present in the contract but its original transaction receipt is not recorded locally, the API returns an explicit service error instead of inventing a hash or block number.
+
+#### Via CLI:
+```bash
+cd indexer
+npm run attest -- --id 0x2cdabbc86a34c27890a226afda3decfe8bc19f88797651a9e57ff8fb62f9077f
+```
+
+### 9. Contract Deployment & Testnet Status
+- **Compilation**: `npm run compile` in `contracts/` (Solidity 0.8.28, Paris EVM).
+- **Contract Tests**: `npm test` in `contracts/` (**13/13 passing**).
+- **Deployment Script**: `node scripts/deploy.js` or `npm run deploy:elysium`.
+- **Testnet Status**: Contract deployment is pending. E2E live attestation remains blocked until a funded testnet wallet and deployed contract address are configured. Unit-test mock contract state is not evidence of a deployed contract.
+
+### 10. Important Product Boundary & Non-Claims
+> [!WARNING]
+> **CRITICAL DISCLAIMERS & BOUNDARIES:**
+> - **NOT an Ascend Approval**: Onchain attestation does **NOT** constitute Ascend or Elysium approval, ranking, certification, or endorsement.
+> - **NOT an Investment Signal**: Attestations do **NOT** represent price predictions, trading signals, or guarantees of token liquidity, safety, or success.
+> - **Scope of Proof**: The attestation proves solely that this project's canonical assessment hash was recorded onchain at a specific block and time.
+
+---
+
+## 10. Known RPC Rate-Limit Limitation & Resilience
 
 The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is hosted on Conduit infrastructure with tight request concurrency boundaries.
 
@@ -531,39 +688,46 @@ The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is ho
 
 ---
 
-## 10. Verification & Quality Assurance
+## 11. Verification & Quality Assurance
 
 ### Automated Test Suite
-The repository includes **112 automated unit and integration tests** across **8 test suites**:
-- [tests/config.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/config.test.ts): Environment variable parsing, validation rules, chain ID assertions, and log password masking.
-- [tests/holder-engine.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/holder-engine.test.ts): Mint/burn accounting, self-transfers, zero-balance transitions, and non-negative invariants.
-- [tests/transfer-processor.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/transfer-processor.test.ts): 3-topic Transfer log decoding, data boundary validation, and deduplication.
-- [tests/checkpoint.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/checkpoint.test.ts): Crash recovery, transaction atomicity, idempotent resume, and target range planning.
-- [tests/rpc-resilience.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/rpc-resilience.test.ts): Exponential backoff with jitter, Conduit `-32017` handling, and adaptive batch halving/growth.
-- [tests/daily-metrics.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/daily-metrics.test.ts): 15 deterministic tests covering all raw metrics, zero address exclusions, self-transfers, concentration ratios, empty dates, idempotency, and UTC boundaries.
-- [tests/assessment.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/assessment.test.ts): 21 deterministic tests covering all 20 Phase 2B audit requirements (holder growth anchors, interpolation, activity anchors, concentration clamping, consistency 0/7 and 7/7, insufficient historical window, exact status boundaries 40/60/75/90, lookahead prevention, idempotency, negative/neutral/positive momentum, and component weighting).
-- [tests/canonical.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/canonical.test.ts): 20 deterministic tests for canonical serialization, fixed field ordering, fixed decimal precision, keccak256 identity, SHA-256 content hashing, tamper detection, HTTP REST API endpoints, 400/404/422 status codes, and verification pipeline.
+The repository includes **144 automated unit and integration tests** across **10 test suites** (131 Vitest tests and 13 Solidity tests):
+- [contracts/test/AssessmentAttestation.t.sol](file:///c:/ELYSIUM/elysium-market-readiness/contracts/test/AssessmentAttestation.t.sol): **13 Solidity EVM tests** covering first attestation, idempotency, conflicting duplicate rejection, zero parameter guards (ID, hash, token, date, methodology), stored data retrieval, and `isAttested`.
+- [indexer/tests/attestation.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/attestation.test.ts): **19 deterministic tests** covering UTC midnight timestamp conversions, methodology `bytes32` packing, SHA-256 `bytes32` exact preservation, event topic verification, mocked attestation API execution, unconfigured behavior, 404/422 guards, missing private key safety, zero secret leakage, and mocked contract verification cases. These fixtures do not represent a live deployment.
+- [indexer/tests/canonical.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/canonical.test.ts): 20 deterministic tests for canonical serialization, fixed field ordering, fixed decimal precision, keccak256 identity, SHA-256 content hashing, tamper detection, HTTP REST API endpoints, 400/404/422 status codes, and verification pipeline.
+- [indexer/tests/assessment.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/assessment.test.ts): 21 deterministic tests covering all Phase 2B scoring and momentum requirements.
+- [indexer/tests/daily-metrics.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/daily-metrics.test.ts): 15 deterministic tests covering all raw metrics, concentration ratios, empty dates, and UTC boundaries.
+- [indexer/tests/checkpoint.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/checkpoint.test.ts): 15 tests for crash recovery, transaction atomicity, idempotent resume, and target range planning.
+- [indexer/tests/rpc-resilience.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/rpc-resilience.test.ts): 14 tests for exponential backoff, Conduit rate-limit resilience, and adaptive batch halving/growth.
+- [indexer/tests/transfer-processor.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/transfer-processor.test.ts): 9 tests for 3-topic Transfer log decoding, data boundary validation, and deduplication.
+- [indexer/tests/holder-engine.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/holder-engine.test.ts): 8 tests for mint/burn accounting, self-transfers, zero-balance transitions, and non-negative invariants.
+- [indexer/tests/config.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/config.test.ts): 8 tests for configuration validation and URL masking.
 
 ```bash
-cd indexer
+# Contract Tests (Hardhat / Solidity)
+cd contracts
+npm test
+
+# Indexer & Attestation Tests (Vitest / TypeScript)
+cd ../indexer
 npm run test
 npm run typecheck
 npm run build
 npm run doctor
 npm run metrics -- --date 2026-09-22
 npm run assess -- --date 2026-09-22
+npm run attest -- --id <assessmentId>
 npm run serve
 ```
 
-### Verified Live Testnet & Assessment Results
+### Previously Recorded Indexer Data
 - **Chain ID**: `99801` (Verified onchain)
 - **Blocks Scanned**: Blocks `0` through `30,000`
 - **ERC-20 Contracts Tracked**: `12` contracts (e.g. USDC, PURR, WHYPE, EBT)
 - **Transfer Events Indexed**: `198` real onchain transfers stored
 - **Daily Metrics Calculated**: 33 daily metric rows across 12 calendar days (idempotent upserts)
 - **Assessments Generated**: Idempotently computed and stored with `assessment_id` and `assessment_hash`
-- **API & Verification**: Verified live on testnet database (`/v1/tokens/:address/assessment` and `/v1/assessments/:id/verify`)
+- **API & Verification**: Offchain assessment API data was recorded in the repository's prior test run. Live contract attestation has not been deployed or verified.
 - **Balance Invariant**: `0` balance anomalies
-- **Doctor Diagnostic**: 100% Passed
-
+- **Current Doctor Diagnostic**: Requires the configured local PostgreSQL database; see current validation results before treating this historical data as available.
 

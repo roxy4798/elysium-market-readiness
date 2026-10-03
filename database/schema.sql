@@ -106,3 +106,20 @@ CREATE INDEX IF NOT EXISTS market_assessments_date_idx ON market_assessments (as
 CREATE INDEX IF NOT EXISTS market_assessments_token_idx ON market_assessments (token_address);
 CREATE INDEX IF NOT EXISTS market_assessments_id_idx ON market_assessments (assessment_id);
 
+-- Phase 3B: Onchain Assessment Attestations
+CREATE TABLE IF NOT EXISTS assessment_attestations (
+    id                BIGSERIAL PRIMARY KEY,
+    assessment_id     VARCHAR(66) NOT NULL UNIQUE,
+    contract_address  VARCHAR(42) NOT NULL,
+    chain_id          BIGINT NOT NULL,
+    transaction_hash  VARCHAR(66) NOT NULL UNIQUE,
+    block_number      BIGINT NOT NULL,
+    attester_address  VARCHAR(42) NOT NULL,
+    attested_at       TIMESTAMP NOT NULL,
+    created_at        TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS assessment_attestations_assessment_id_idx ON assessment_attestations (assessment_id);
+CREATE INDEX IF NOT EXISTS assessment_attestations_tx_idx ON assessment_attestations (transaction_hash);
+CREATE INDEX IF NOT EXISTS assessment_attestations_contract_idx ON assessment_attestations (contract_address);
+

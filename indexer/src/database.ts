@@ -55,7 +55,15 @@ export interface Store {
   close(): Promise<void>;
 }
 
-export const REQUIRED_TABLES = ['tokens', 'transfers', 'balances', 'indexer_state'] as const;
+export const REQUIRED_TABLES = [
+  'tokens',
+  'transfers',
+  'balances',
+  'indexer_state',
+  'daily_metrics',
+  'market_assessments',
+  'assessment_attestations',
+] as const;
 
 const CHUNK = 2000;
 
