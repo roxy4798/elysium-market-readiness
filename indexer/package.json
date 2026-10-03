@@ -13,6 +13,7 @@
     "start": "node dist/main.js run",
     "migrate": "tsx src/main.ts migrate",
     "doctor": "tsx src/main.ts doctor",
+    "metrics": "tsx src/main.ts metrics",
     "test": "vitest run",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json"

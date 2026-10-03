@@ -1,4 +1,4 @@
--- Elysium Market Readiness — Phase 1 schema (ERC-20 indexer)
+-- Elysium Market Readiness — Schema (Phase 1 indexer + Phase 2A daily metrics)
 -- Independent developer project. Not an official Ascend / Elysium product.
 -- Idempotent: safe to apply multiple times.
 
@@ -51,3 +51,24 @@ CREATE TABLE IF NOT EXISTS indexer_state (
     last_processed_block  BIGINT NOT NULL,
     updated_at            TIMESTAMP DEFAULT NOW()
 );
+
+-- Phase 2A: Deterministic daily market metrics
+CREATE TABLE IF NOT EXISTS daily_metrics (
+    token_address       VARCHAR(42) NOT NULL REFERENCES tokens(address) ON DELETE CASCADE,
+    date                DATE NOT NULL,
+    holder_count        INTEGER NOT NULL DEFAULT 0,
+    new_holders         INTEGER NOT NULL DEFAULT 0,
+    active_holders      INTEGER NOT NULL DEFAULT 0,
+    transfer_count      INTEGER NOT NULL DEFAULT 0,
+    unique_senders      INTEGER NOT NULL DEFAULT 0,
+    unique_receivers    INTEGER NOT NULL DEFAULT 0,
+    top1_concentration  NUMERIC,
+    top5_concentration  NUMERIC,
+    top10_concentration NUMERIC,
+    created_at          TIMESTAMP DEFAULT NOW(),
+    updated_at          TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (token_address, date)
+);
+
+CREATE INDEX IF NOT EXISTS daily_metrics_date_idx ON daily_metrics (date);
+CREATE INDEX IF NOT EXISTS daily_metrics_token_idx ON daily_metrics (token_address);

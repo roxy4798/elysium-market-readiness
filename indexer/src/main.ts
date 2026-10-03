@@ -13,6 +13,13 @@ import { RULE, logger } from './logger.js';
 import { Scanner, runIndexer, viemChainReader, type IdleReport, type RangeReport } from './scanner.js';
 import { TokenValidator, viemContractReader } from './token-validator.js';
 import { TRANSFER_TOPIC } from './abi/erc20.js';
+import {
+  calculateAndStoreDailyMetrics,
+  generateDateSequence,
+  getIndexedDataBounds,
+  loadTokens,
+  validateDateString,
+} from './metrics/daily-metrics.js';
 
 const SCHEMA_PATH = fileURLToPath(new URL('../../database/schema.sql', import.meta.url));
 
@@ -208,6 +215,188 @@ async function cmdMigrate(config: IndexerConfig): Promise<number> {
   }
 }
 
+async function cmdMetrics(config: IndexerConfig): Promise<number> {
+  const argv = process.argv.slice(3);
+  let targetDate: string | undefined;
+  let fromDate: string | undefined;
+  let toDate: string | undefined;
+  let tokenFilter: string | undefined;
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--date' && argv[i + 1]) targetDate = argv[++i];
+    else if (a === '--from' && argv[i + 1]) fromDate = argv[++i];
+    else if (a === '--to' && argv[i + 1]) toDate = argv[++i];
+    else if (a === '--token' && argv[i + 1]) tokenFilter = argv[++i];
+    else if (a === '--help' || a === '-h') {
+      console.log(`
+Usage: npm run metrics [options]
+
+Options:
+  --date <YYYY-MM-DD>             Calculate raw metrics for a single UTC calendar date
+  --from <YYYY-MM-DD> --to <date> Calculate raw metrics for an inclusive date range
+  --token <address>               Filter calculation to a specific token address
+  --help, -h                      Show this help message
+`);
+      return 0;
+    }
+  }
+
+  const store = await connectDatabase(config);
+  try {
+    const bounds = await getIndexedDataBounds(store.pool);
+    if (!bounds.minDate || !bounds.maxDate || bounds.transferCount === 0) {
+      console.log([
+        RULE,
+        'ELYSIUM DAILY METRICS — NOTICE',
+        RULE,
+        '',
+        'Status:',
+        'INSUFFICIENT_INDEXED_DATA',
+        '',
+        'Reason:',
+        'No indexed ERC-20 transfer logs found in PostgreSQL.',
+        'Run the indexer first to populate onchain data: npm run dev',
+        '',
+        RULE,
+      ].join('\n'));
+      return 0;
+    }
+
+    let datesToProcess: string[] = [];
+
+    if (targetDate) {
+      const v = validateDateString(targetDate);
+      if (!v.valid) {
+        logger.error(`invalid date: ${v.error}`);
+        return 2;
+      }
+      datesToProcess = [v.normalized];
+    } else if (fromDate || toDate) {
+      if (!fromDate || !toDate) {
+        logger.error('both --from and --to must be provided when specifying a date range');
+        return 2;
+      }
+      const vFrom = validateDateString(fromDate);
+      const vTo = validateDateString(toDate);
+      if (!vFrom.valid || !vTo.valid) {
+        logger.error(`invalid date range: ${vFrom.error ?? vTo.error}`);
+        return 2;
+      }
+      try {
+        datesToProcess = generateDateSequence(vFrom.normalized, vTo.normalized);
+      } catch (err) {
+        logger.error(err instanceof Error ? err.message : String(err));
+        return 2;
+      }
+    } else {
+      // Default: process all dates available in indexed transfers
+      datesToProcess = generateDateSequence(bounds.minDate, bounds.maxDate);
+    }
+
+    // Check if requested dates fall within the indexed range
+    const validIndexedDates: string[] = [];
+    const outOfBoundsDates: string[] = [];
+
+    for (const d of datesToProcess) {
+      if (d < bounds.minDate || d > bounds.maxDate) {
+        outOfBoundsDates.push(d);
+      } else {
+        validIndexedDates.push(d);
+      }
+    }
+
+    if (outOfBoundsDates.length > 0 && validIndexedDates.length === 0) {
+      console.log([
+        RULE,
+        'ELYSIUM DAILY METRICS — NOTICE',
+        RULE,
+        '',
+        'Date(s):',
+        outOfBoundsDates.join(', '),
+        '',
+        'Status:',
+        'INSUFFICIENT_INDEXED_DATA',
+        '',
+        'Reason:',
+        `Requested date(s) fall outside the indexed block data range (${bounds.minDate} to ${bounds.maxDate}).`,
+        `Earliest indexed transfer: ${bounds.minDate}. Checkpoint reached: block #${bounds.lastProcessedBlock ?? 'unknown'}.`,
+        'Phase 1 indexer only stores verified onchain blocks up to the checkpoint.',
+        '',
+        RULE,
+      ].join('\n'));
+      return 0;
+    }
+
+    const tokens = await loadTokens(store.pool, tokenFilter);
+    const tokenMap = new Map(tokens.map((t) => [t.address.toLowerCase(), t]));
+
+    const computed = await calculateAndStoreDailyMetrics(store.pool, validIndexedDates, tokenFilter);
+
+    for (const m of computed) {
+      const tok = tokenMap.get(m.tokenAddress.toLowerCase());
+      const symbol = tok?.symbol ?? tok?.name ?? m.tokenAddress;
+
+      console.log([
+        RULE,
+        'ELYSIUM DAILY METRICS',
+        RULE,
+        '',
+        'Date:',
+        m.date,
+        '',
+        'Token:',
+        symbol,
+        '',
+        'Holders:',
+        m.holderCount,
+        '',
+        'New Holders:',
+        m.newHolders,
+        '',
+        'Active Holders:',
+        m.activeHolders,
+        '',
+        'Transfers:',
+        m.transferCount,
+        '',
+        'Unique Senders:',
+        m.uniqueSenders,
+        '',
+        'Unique Receivers:',
+        m.uniqueReceivers,
+        '',
+        'Top 1:',
+        m.top1Concentration !== null ? m.top1Concentration.toFixed(2) : 'N/A',
+        '',
+        'Top 5:',
+        m.top5Concentration !== null ? m.top5Concentration.toFixed(2) : 'N/A',
+        '',
+        'Top 10:',
+        m.top10Concentration !== null ? m.top10Concentration.toFixed(2) : 'N/A',
+        '',
+        'Status:',
+        'CALCULATED',
+        '',
+        RULE,
+      ].join('\n'));
+    }
+
+    if (outOfBoundsDates.length > 0) {
+      console.log(`Notice: skipped ${outOfBoundsDates.length} date(s) outside indexed range: ${outOfBoundsDates.join(', ')}`);
+    }
+
+    logger.info('metrics calculation completed', {
+      dates: validIndexedDates.length,
+      records: computed.length,
+      tokens: tokens.length,
+    });
+    return 0;
+  } finally {
+    await store.close();
+  }
+}
+
 async function main(): Promise<number> {
   const cmd = process.argv[2] ?? 'run';
   let config: IndexerConfig;
@@ -229,8 +418,10 @@ async function main(): Promise<number> {
       return cmdDoctor(config);
     case 'migrate':
       return cmdMigrate(config);
+    case 'metrics':
+      return cmdMetrics(config);
     default:
-      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate)`);
+      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics)`);
       return 2;
   }
 }

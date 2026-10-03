@@ -12,20 +12,20 @@
 
 ---
 
-## 1. Project Overview & Current Scope
+## 1. Project Overview & Scope
 
-**Current Status: Phase 1 — ERC-20 Indexer & Onchain Data Layer.**  
-*(Phase 2 scoring engine and risk metrics are planned for subsequent phases and are NOT present in this repository.)*
+**Current Status:**
+- **Phase 1**: ERC-20 Indexer & Onchain Data Layer (COMPLETE)
+- **Phase 2A**: Raw Market Metrics Engine (COMPLETE)
+- *(Phase 2B/3 scoring engine, Health Score, Momentum Score, and rankings belong to subsequent phases and are NOT present in this repository.)*
 
-Phase 1 provides a production-grade, fault-tolerant indexing engine specifically configured and tuned for the **Elysium Testnet**:
-- Connects directly to **Elysium Testnet** (`Chain ID: 99801`, gas token `HYPE`).
-- Discovers, decodes, and indexes all onchain ERC-20 `Transfer(address,address,uint256)` event logs.
-- Strictly validates candidate token contracts onchain (`decimals()`, `totalSupply()`, optional `name()`, `symbol()`).
-- Rejects non-ERC20s, NFTs (ERC-721/1155), EOAs, and reverting contract interfaces.
-- Atomically persists parsed transfers, token metadata, and holder balances into PostgreSQL.
-- Implements idempotent re-indexing, strict non-negative balance accounting, and zero-balance transitions.
-- Provides atomic block checkpointing for crash-recovery and seamless restartability.
-- Features adaptive RPC batching and exponential backoff with jitter to handle Elysium RPC rate limits.
+### Core Capabilities:
+- **Testnet RPC Connectivity**: Connects directly to **Elysium Testnet** (`Chain ID: 99801`, gas token `HYPE`).
+- **ERC-20 Event Indexer**: Discovers, decodes, and indexes onchain `Transfer(address,address,uint256)` event logs.
+- **Strict Onchain Validation**: Multi-call contract checks (`decimals()`, `totalSupply()`, `name()`, `symbol()`), filtering non-ERC20s, NFTs, and reverts.
+- **Deterministic Raw Metrics Engine**: Converts indexed transfers and balances into daily raw market metrics with zero estimates and zero synthetic data.
+- **Idempotent PostgreSQL Storage**: Atomic transactional persistence with conflict handling on `transfers` and `daily_metrics`.
+- **Fault-Tolerant Checkpointing**: Durable checkpoint tracking in PostgreSQL allowing clean stop/resume cycles without gaps or re-indexing.
 
 ---
 
@@ -45,7 +45,7 @@ Phase 1 provides a production-grade, fault-tolerant indexing engine specifically
 ```text
 elysium-market-readiness/
 ├── .gitignore                      # Root gitignore (excludes secrets, builds, runtime data)
-├── README.md                       # Architecture, setup, and Phase 1 documentation
+├── README.md                       # Architecture, setup, and Phase 1 / 2A documentation
 ├── database/
 │   └── schema.sql                  # PostgreSQL idempotent schema & indexes
 └── indexer/
@@ -63,13 +63,20 @@ elysium-market-readiness/
     │   ├── database.ts             # PostgreSQL pool & transactional repository
     │   ├── holder-engine.ts        # Pure in-memory accounting & balance anomalies
     │   ├── logger.ts               # Leveled JSON/text console logger
-    │   ├── main.ts                 # CLI entrypoint (run, migrate, doctor)
+    │   ├── main.ts                 # CLI entrypoint (run, migrate, doctor, metrics)
     │   ├── scanner.ts              # Adaptive log fetcher, pipeline orchestrator
     │   ├── token-validator.ts      # Multi-call ERC-20 validator & bytes32 decoder
-    │   └── transfer-processor.ts   # 3-topic Transfer log decoder & deduplicator
+    │   ├── transfer-processor.ts   # 3-topic Transfer log decoder & deduplicator
+    │   └── metrics/
+    │       ├── types.ts            # Metrics data structures & Transfer interfaces
+    │       ├── activity-metrics.ts # Transfer count, senders, receivers, active holders
+    │       ├── holder-metrics.ts   # End-of-day holder count & new holder detection
+    │       ├── concentration-metrics.ts # Onchain holder concentration (Top 1, 5, 10)
+    │       └── daily-metrics.ts    # Coordinator, date boundaries, and DB upserts
     └── tests/
         ├── checkpoint.test.ts      # Checkpoint persistence and crash recovery tests
         ├── config.test.ts          # Config loading and credential redaction tests
+        ├── daily-metrics.test.ts   # 15 deterministic raw metrics & edge case tests
         ├── holder-engine.test.ts   # Invariant and balance accounting tests
         ├── rpc-resilience.test.ts  # Adaptive batching, retry, rate limit tests
         ├── transfer-processor.test.ts # Transfer log decoding and validation tests
@@ -80,7 +87,7 @@ elysium-market-readiness/
 
 ---
 
-## 4. Architecture & Pipeline
+## 4. Architecture & Data Flow
 
 ```text
                      ┌────────────────────────────────────────┐
@@ -92,7 +99,7 @@ elysium-market-readiness/
                         (Transfer topic) │  totalSupply, name, symbol)
                                          │
 ┌────────────────────────────────────────┴────────────────────────────────────────┐
-│ Scanner & Ingestion Pipeline                                                    │
+│ Phase 1: Ingestion Pipeline                                                     │
 │                                                                                 │
 │  1. Checkpoint Loader ──► Determines next unprocessed block range               │
 │  2. AdaptiveLogFetcher ──► Queries logs with auto-halving / auto-growth         │
@@ -109,17 +116,18 @@ elysium-market-readiness/
                      │  - transfers (UNIQUE tx_hash,log_index)│
                      │  - balances (CHECK balance >= 0)       │
                      │  - indexer_state (checkpoint)          │
-                     └────────────────────────────────────────┘
+                     │  - daily_metrics (PK: token, date)     │
+                     └───────────────────┬────────────────────┘
+                                         │
+┌────────────────────────────────────────┴────────────────────────────────────────┐
+│ Phase 2A: Deterministic Raw Metrics Engine                                      │
+│                                                                                 │
+│  1. Activity Aggregator   ──► transfer_count, unique senders, receivers, active │
+│  2. Holder Balance Engine ──► end-of-day holder_count (> 0) & new_holders (0->+)│
+│  3. Concentration Engine  ──► top1, top5, top10 onchain holder concentration   │
+│  4. Idempotent Upserter   ──► ON CONFLICT (token_address, date) DO UPDATE       │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Module Responsibilities:
-- [src/client.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/client.ts): Viem `PublicClient` setup with jittered exponential backoff (`withRetry`). Classifies transient errors (HTTP 429, 502-504, network timeouts, Conduit rate limit `-32017`) vs permanent contract execution reverts.
-- [src/scanner.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/scanner.ts): Bounded range scanner coordinating log fetching, token validation, block timestamp caching, and atomic persistence. Never skips blocks.
-- [src/token-validator.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/token-validator.ts): Distinguishes valid ERC-20 contracts from NFTs, reverts, or arbitrary contracts. Supports both standard UTF-8 string and legacy bytes32 metadata encoding.
-- [src/transfer-processor.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/transfer-processor.ts): Strict log validation (topic0 `0xddf252ad...`, indexed `from`/`to`, unindexed 32-byte `value`).
-- [src/holder-engine.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/holder-engine.ts): In-memory accounting: handles mints (`from == 0x0`), burns (`to == 0x0`), self-transfers, zero-balance pruning, and balance anomaly tracking.
-- [src/database.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/database.ts): PostgreSQL transactional storage (`pg`). Uses `ON CONFLICT DO NOTHING` for transfers and upsert logic for tokens and balances.
-- [src/checkpoint.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/src/checkpoint.ts): Durable checkpoint management guaranteeing restart recovery starting exactly from `last_processed_block + 1`.
 
 ---
 
@@ -130,86 +138,115 @@ Defined in [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/dat
 - **`transfers`**: `id` (BIGSERIAL PK), `token_address`, `tx_hash`, `log_index`, `block_number`, `block_timestamp`, `from_address`, `to_address`, `amount`. Unique index on `(tx_hash, log_index)`.
 - **`balances`**: `token_address`, `holder_address`, `balance` (`CHECK balance >= 0`), `last_updated_block`. Primary key on `(token_address, holder_address)`.
 - **`indexer_state`**: Single-row checkpoint table storing `last_processed_block` and `updated_at`.
+- **`daily_metrics`**: `token_address`, `date`, `holder_count`, `new_holders`, `active_holders`, `transfer_count`, `unique_senders`, `unique_receivers`, `top1_concentration`, `top5_concentration`, `top10_concentration`, timestamps. Primary key on `(token_address, date)`.
 
-No database dumps or runtime database files are tracked in Git. The database is 100% reproducible from [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/database/schema.sql) and the migration command.
+The database is 100% reproducible from [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/database/schema.sql) and `npm run migrate`.
 
 ---
 
-## 6. Local Setup & Usage
+## 6. Phase 2A — Raw Market Metrics
 
-### Prerequisites
-- Node.js >= 20.12
-- PostgreSQL 14+
+Phase 2A converts indexed ERC-20 transfer and holder balance data into daily raw market metrics.
 
-### Installation
+### Metric Definitions:
+1. **`holder_count`**: Number of token holders with a positive balance (`> 0`) at the end of the selected day (`23:59:59.999 UTC`). Excludes zero address (`0x000...000`).
+2. **`new_holders`**: Number of addresses that became holders for the first time on the selected day (balance transitioned from `0 → positive`). Excludes existing holders receiving additional tokens, self-transfers, zero address, and burns. Counted at most once per address.
+3. **`active_holders`**: Number of unique non-zero addresses participating in at least one valid transfer of the token during the selected day (`unique(from_address) UNION unique(to_address)`).
+4. **`transfer_count`**: Number of valid ERC-20 Transfer events stored for the token on the selected day.
+5. **`unique_senders`**: Number of unique non-zero `from_address` values for the token on the selected day.
+6. **`unique_receivers`**: Number of unique non-zero `to_address` values for the token on the selected day.
+7. **`top1_concentration`**, **`top5_concentration`**, **`top10_concentration`**:
+   - `top 1 holder balance / total tracked positive balance`
+   - `sum of top 5 holder balances / total tracked positive balance`
+   - `sum of top 10 holder balances / total tracked positive balance`
+   - Stored as decimal ratios between `0` and `1` (e.g. `0.25` for 25%). Calculated strictly using BigInt arithmetic to eliminate IEEE 754 floating point precision errors.
+
+### UTC Date Convention:
+All daily metrics use **UTC** calendar boundaries exclusively (`YYYY-MM-DD 00:00:00.000Z` to `YYYY-MM-DD 23:59:59.999Z`). Local machine timezones never influence metric calculation.
+
+### Concentration Terminology & Limitations:
+- These metrics measure **onchain holder concentration**, NOT "investor concentration" or "human ownership concentration".
+- Onchain addresses cannot automatically be assumed to represent individual human beings (contracts, liquidity pools, exchanges, or single users with multiple wallets are not distinguished at this layer).
+- If a token has zero positive holders or no transfers, concentration ratios are stored as `null`.
+
+### Historical Range & Missing Data Handling:
+- The metrics engine works deterministically on whatever indexed data exists in PostgreSQL.
+- If a requested date precedes the earliest indexed block or exceeds the latest indexed block checkpoint, the CLI returns a clear `INSUFFICIENT_INDEXED_DATA` status explaining the exact block boundary.
+- No synthetic or estimated values are ever fabricated.
+
+### CLI Usage:
 ```bash
-cd indexer
-npm install
+# Calculate metrics for a single UTC date:
+npm run metrics -- --date 2026-09-22
+
+# Calculate metrics across an inclusive date range:
+npm run metrics -- --from 2026-09-11 --to 2026-09-22
+
+# Filter calculation to a specific token:
+npm run metrics -- --date 2026-09-22 --token 0x7d29d8047b905000459c0e80c34a26ceedcb47b2
+
+# Show help:
+npm run metrics -- --help
 ```
 
-### PostgreSQL Setup & Migration
-Create a PostgreSQL database (e.g. `market_readiness`), then configure your `.env`:
-```bash
-cp .env.example .env
+### Example CLI Output:
+```text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ELYSIUM DAILY METRICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Date:
+2026-09-22
+
+Token:
+USDC
+
+Holders:
+49
+
+New Holders:
+49
+
+Active Holders:
+50
+
+Transfers:
+78
+
+Unique Senders:
+9
+
+Unique Receivers:
+50
+
+Top 1:
+0.36
+
+Top 5:
+0.92
+
+Top 10:
+0.94
+
+Status:
+CALCULATED
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
-Edit `.env` with your database credentials:
-```env
-RPC_URL=https://testnet-rpc.elysium.kinetiq.xyz
-CHAIN_ID=99801
-DATABASE_URL=postgresql://elysium:CHANGE_ME@localhost:5432/market_readiness
-
-START_BLOCK=
-BLOCK_BATCH_SIZE=2000
-CONFIRMATION_BLOCKS=5
-
-RPC_CONCURRENCY=2
-RPC_RETRY_BASE_DELAY_MS=1500
-
-LOG_LEVEL=info
-```
-
-Run migrations idempotently:
-```bash
-npm run migrate
-```
-
-### Health Check (Doctor)
-Run the diagnostic doctor to verify Elysium RPC connectivity, chain ID verification, database connectivity, and checkpoint state:
-```bash
-npm run doctor
-```
-
-### Building & Running the Indexer
-Run in development mode (live indexing with tsx):
-```bash
-npm run dev
-```
-
-Build for production:
-```bash
-npm run build
-npm start
-```
-
-### Checkpoint & Resume Behavior
-The indexer maintains atomic state in the `indexer_state` table.
-- When started with an empty database and no `START_BLOCK`, indexing begins at block `0`.
-- If interrupted (e.g. SIGINT, crash, or deployment restart), restarting with `npm run dev` or `npm start` automatically queries `indexer_state` and resumes from `last_processed_block + 1`.
-- Transfers and balances within each batch are committed in a single PostgreSQL transaction together with the updated checkpoint. If any step fails, the transaction is rolled back and no blocks are marked processed.
 
 ---
 
 ## 7. Known RPC Rate-Limit Limitation & Resilience
 
-The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is hosted on Conduit infrastructure with tight request concurrency and payload boundaries.
+The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is hosted on Conduit infrastructure with tight request concurrency boundaries.
 
 ### Known Limitations:
 1. **Conduit Rate Limit (`-32017`)**: High concurrency or excessive block ranges return JSON-RPC error code `-32017` ("Rate limit exceeded").
 2. **Log Query Range Caps**: Requesting large block ranges during high-activity periods can trigger gateway timeouts (`504 Gateway Timeout`) or HTTP 429.
 
 ### Built-in Mitigations:
-- **Adaptive Batch Halving**: When an `eth_getLogs` query fails with a rate limit or timeout, the range is automatically halved (down to `MIN_BLOCK_BATCH_SIZE=10`) and retried immediately.
-- **Adaptive Batch Growth**: Once 5 consecutive queries succeed without issues, the batch size gradually doubles back toward `BLOCK_BATCH_SIZE`.
+- **Adaptive Batch Halving**: Automatically halves the range (down to `MIN_BLOCK_BATCH_SIZE=10`) upon error and retries immediately without dropping blocks.
+- **Adaptive Batch Growth**: Gradually doubles back toward `BLOCK_BATCH_SIZE` after 5 consecutive successes.
 - **Exponential Backoff with Jitter**: Transient network errors and rate limits back off exponentially (`RPC_RETRY_BASE_DELAY_MS=1500`, up to `RPC_MAX_RETRIES=5`).
 - **Throttled Concurrency**: Controlled concurrent RPC calls (`RPC_CONCURRENCY=2`) prevent saturating the public endpoint.
 
@@ -218,25 +255,28 @@ The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is ho
 ## 8. Verification & Quality Assurance
 
 ### Automated Test Suite
-The repository includes 54 automated unit and integration tests across 5 test suites:
+The repository includes 71 automated unit and integration tests across 6 test suites:
 - [tests/config.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/config.test.ts): Environment variable parsing, validation rules, chain ID assertions, and log password masking.
 - [tests/holder-engine.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/holder-engine.test.ts): Mint/burn accounting, self-transfers, zero-balance transitions, and non-negative invariants.
 - [tests/transfer-processor.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/transfer-processor.test.ts): 3-topic Transfer log decoding, data boundary validation, and deduplication.
 - [tests/checkpoint.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/checkpoint.test.ts): Crash recovery, transaction atomicity, idempotent resume, and target range planning.
 - [tests/rpc-resilience.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/rpc-resilience.test.ts): Exponential backoff with jitter, Conduit `-32017` handling, and adaptive batch halving/growth.
+- [tests/daily-metrics.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/daily-metrics.test.ts): 15 deterministic tests covering all raw metrics, zero address exclusions, self-transfers, concentration ratios, empty dates, idempotency, and UTC boundaries.
 
 ```bash
+cd indexer
 npm run test
 npm run typecheck
 npm run build
 npm run doctor
+npm run metrics -- --date 2026-09-22
 ```
 
-### Verified Onchain Results (Phase 1 Baseline)
+### Verified Live Testnet & Metrics Results
 - **Chain ID**: `99801` (Verified onchain)
 - **Blocks Scanned**: Blocks `0` through `30,000`
-- **ERC-20 Contracts Validated**: `12` contracts (e.g. WHYPE, Elysium Bridge Test / EBT)
+- **ERC-20 Contracts Tracked**: `12` contracts (e.g. USDC, PURR, WHYPE, EBT)
 - **Transfer Events Indexed**: `198` real onchain transfers stored
-- **Holder Balances Maintained**: `81` distinct active holders
+- **Daily Metrics Calculated**: 33 daily metric rows across 12 calendar days (idempotent upserts)
 - **Balance Invariant**: `0` balance anomalies
-- **Checkpoint**: Successfully reached and persisted at block `30,000`
+- **Doctor Diagnostic**: 100% Passed
