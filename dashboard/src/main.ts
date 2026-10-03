@@ -1,5 +1,7 @@
 import { api, ApiError, type AssessmentComponents, type AssessmentDetail, type CanonicalAssessment, type DailyMetric, type OverviewResponse, type TokenListItem, type VerificationResponse } from './api.js';
 import { assessmentAvailability, escapeHtml, ratioPercent, routeFromHash, scoreText, valueText, verificationState } from './presentation.js';
+import { methodologyPageHtml } from './methodology.js';
+import { verificationFlowHtml, type RecordedAttestationFields } from './trust.js';
 
 const content = document.querySelector<HTMLElement>('#page-content')!;
 const sideNav = document.querySelector<HTMLElement>('#side-nav')!;
@@ -30,17 +32,18 @@ function tokenHref(address: string): string { return `#/tokens/${encodeURICompon
 function historyHref(address: string): string { return `${tokenHref(address)}/assessments`; }
 function detailHref(address: string, date: string): string { return `${historyHref(address)}/${encodeURIComponent(date)}`; }
 
-function setShell(active: 'dashboard' | 'overview' | 'history', address?: string, title?: string): void {
-  breadcrumb.textContent = title ?? (active === 'dashboard' ? 'Market overview' : active === 'overview' ? 'Token overview' : 'Assessment history');
+function setShell(active: 'dashboard' | 'overview' | 'history' | 'methodology', address?: string, title?: string): void {
+  breadcrumb.textContent = title ?? (active === 'dashboard' ? 'Market overview' : active === 'overview' ? 'Token overview' : active === 'history' ? 'Assessment history' : 'How it works');
   if (!address) {
-    sideNav.innerHTML = `<a class="nav-link ${active === 'dashboard' ? 'active' : ''}" href="#/"><span class="nav-icon" aria-hidden="true">▦</span>Market overview</a>`;
+    sideNav.innerHTML = `<a class="nav-link ${active === 'dashboard' ? 'active' : ''}" href="#/"><span class="nav-icon" aria-hidden="true">▦</span>Market overview</a><a class="nav-link ${active === 'methodology' ? 'active' : ''}" href="#/methodology"><span class="nav-icon" aria-hidden="true">◎</span>How it works</a>`;
     return;
   }
   sideNav.innerHTML = `
     <a class="nav-link" href="#/"><span class="nav-icon" aria-hidden="true">‹</span>All tokens</a>
     <div class="nav-token">${esc(shortAddress(address))}</div>
     <a class="nav-link ${active === 'overview' ? 'active' : ''}" href="${tokenHref(address)}"><span class="nav-icon" aria-hidden="true">◫</span>Overview</a>
-    <a class="nav-link ${active === 'history' ? 'active' : ''}" href="${historyHref(address)}"><span class="nav-icon" aria-hidden="true">◷</span>Assessment history</a>`;
+    <a class="nav-link ${active === 'history' ? 'active' : ''}" href="${historyHref(address)}"><span class="nav-icon" aria-hidden="true">◷</span>Assessment history</a>
+    <a class="nav-link ${active === 'methodology' ? 'active' : ''}" href="#/methodology"><span class="nav-icon" aria-hidden="true">◎</span>How it works</a>`;
 }
 
 function shellLoading(active: 'dashboard' | 'overview' | 'history', address?: string): void {
@@ -143,6 +146,11 @@ async function renderDashboard(page: number, revision: number): Promise<void> {
   }
 }
 
+function renderMethodology(): void {
+  setShell('methodology');
+  content.innerHTML = methodologyPageHtml;
+}
+
 function componentCards(components: AssessmentComponents | null | undefined): string {
   return COMPONENTS.map(({ key, title, weight }) => {
     const score = components?.[key] ?? null;
@@ -174,8 +182,8 @@ function activityChart(metrics: DailyMetric[]): string {
 function attestationSummary(state: OverviewResponse['attestation']): string {
   if (!state.configured) return 'Not configured';
   if (state.mismatch || (state.attested && state.data_matches === false)) return 'Mismatch';
-  if (state.attested) return 'Attested';
-  return 'Not attested';
+  if (state.attested && state.data_matches === null) return 'Verification unavailable';
+  return state.attested ? 'Attested' : 'Not attested';
 }
 
 async function renderOverview(address: string, revision: number): Promise<void> {
@@ -269,40 +277,18 @@ function coverageError(body: unknown): { reason: string; date: string; windowDay
   return { reason: insufficient.reason ?? 'INSUFFICIENT_HISTORICAL_WINDOW', date: insufficient.assessment_date ?? 'Not available', windowDays: insufficient.data_window_days ?? 0 };
 }
 
-function canonicalState(result: VerificationResponse | null): string {
-  if (!result) return 'Not checked';
-  return result.canonical_valid ? 'Valid' : 'Invalid';
-}
-
-function onchainState(result: VerificationResponse | null): string {
-  if (!result) return 'Not checked';
-  if (!result.onchain.configured) return 'Not configured';
-  if (result.onchain.error) return 'Verification unavailable';
-  if (result.onchain_attested && !result.onchain_data_matches) return 'Mismatch';
-  return result.onchain_attested ? 'Attested' : 'Not attested';
-}
-
-function verificationMetadata(result: VerificationResponse | null): string {
-  if (!result?.onchain.configured) return '';
-  const values: Array<[string, string | number | undefined]> = [
-    ['Contract address', result.onchain.contract_address], ['Chain ID', result.onchain.chain_id],
-    ['Attester', result.onchain.attester], ['Attested at', result.onchain.attested_at ? new Date(result.onchain.attested_at * 1000).toISOString() : undefined],
-  ];
-  return values.filter(([, value]) => value !== undefined && value !== '').map(([label, value]) => `<div><dt>${esc(label)}</dt><dd class="mono">${esc(value)}</dd></div>`).join('');
-}
-
-function detailSuccess(address: string, result: AssessmentDetail, verification: VerificationResponse | null): string {
+function detailSuccess(address: string, result: AssessmentDetail, verification: VerificationResponse | null, recorded: RecordedAttestationFields | null): string {
   const components = result.components;
   const rows = [
     ['Assessment ID', result.assessment_id ? `<span class="mono">${esc(result.assessment_id)}</span><button class="copy-button" type="button" data-copy="${esc(result.assessment_id)}">Copy</button>` : '<span>Not available</span>'],
     ['Assessment date', esc(result.assessment_date)], ['Schema version', esc(result.schema_version)], ['Methodology version', esc(result.methodology_version)],
-    ['Health score', esc(scoreText(result.health_score, result.status))], ['Activity momentum', esc(valueText(result.momentum))], ['Status', statusPill(result.status)], ['Assessment hash', result.assessment_hash ? `<span class="mono">${esc(result.assessment_hash)}</span><button class="copy-button" type="button" data-copy="${esc(result.assessment_hash)}">Copy</button>` : '<span>Not available</span>'],
+    ['Health score', esc(scoreText(result.health_score, result.status))], ['Activity Momentum', esc(valueText(result.momentum))], ['Status', statusPill(result.status)], ['Assessment hash', result.assessment_hash ? `<span class="mono">${esc(result.assessment_hash)}</span><button class="copy-button" type="button" data-copy="${esc(result.assessment_hash)}">Copy</button>` : '<span>Not available</span>'],
   ];
   return `<section class="page-heading compact-heading"><div><p class="eyebrow">CANONICAL ASSESSMENT</p><h1>Assessment detail</h1><p class="heading-subtitle">${esc(result.token.symbol)} · ${esc(result.assessment_date)}</p></div><a class="button button-small" href="${historyHref(address)}">Assessment history</a></section>
-    <section class="section-card detail-card"><div class="section-heading"><div><p class="eyebrow">ASSESSMENT RECORD</p><h2>Canonical fields</h2></div>${statusPill(result.status)}</div><dl class="detail-list detail-list-wide">${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl></section>
-    <section class="content-grid detail-grid"><article class="section-card"><div class="section-heading"><div><p class="eyebrow">CANONICAL VERIFICATION</p><h2>${esc(canonicalState(verification).toUpperCase())}</h2></div><span class="verification-mark ${verification?.canonical_valid ? 'mark-good' : 'mark-muted'}" aria-hidden="true">${verification?.canonical_valid ? '✓' : '·'}</span></div><p>Verification compares the persisted assessment identity and hash using the canonical verifier.</p>${verification ? `<div class="check-grid">${[['Identity valid', verification.valid],['Canonical data valid',verification.canonical_valid],['Assessment hash',verification.assessment_hash]].map(([label,value])=>`<div><span>${esc(label)}</span><strong>${typeof value === 'boolean' ? (value ? 'Valid' : 'Invalid') : esc(value)}</strong></div>`).join('')}</div>` : '<p class="muted-value">Verification result is unavailable.</p>'}</article>
-    <article class="section-card"><div class="section-heading"><div><p class="eyebrow">ONCHAIN</p><h2>${esc(onchainState(verification).toUpperCase())}</h2></div><span class="verification-mark mark-neutral" aria-hidden="true">◇</span></div><p>Onchain attestation is reported separately from canonical verification.</p><dl class="detail-list">${verificationMetadata(verification)}</dl></article></section>
-    <section class="section-card component-card"><div class="section-heading"><div><p class="eyebrow">HEALTH COMPONENTS</p><h2>Values from the assessment API</h2></div></div><div class="component-list">${componentCards(components)}</div></section>`;
+    <section class="trust-stack" aria-label="Assessment, canonical verification, and onchain attestation">
+      <article class="section-card trust-step assessment-step"><div class="section-heading"><div><p class="eyebrow">1 · ASSESSMENT</p><h2>Persisted assessment</h2></div>${statusPill(result.status)}</div><dl class="detail-list detail-list-wide">${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl><div class="trust-components"><p class="eyebrow">COMPONENT SCORES RETURNED BY THE API</p><div class="component-list">${componentCards(components)}</div></div></article>
+      ${verificationFlowHtml(verification, recorded)}
+    </section>`;
 }
 
 async function renderAssessmentDetail(address: string, date: string, revision: number): Promise<void> {
@@ -312,12 +298,21 @@ async function renderAssessmentDetail(address: string, date: string, revision: n
     if (revision !== renderRevision) return;
     const assessment = result;
     let verification: VerificationResponse | null = null;
+    let recordedAttestation: RecordedAttestationFields | null = null;
     if (assessment.assessment_id) {
       try { verification = await api.verification(assessment.assessment_id); }
       catch { verification = null; }
+      if (verification?.onchain_attested && verification.onchain_data_matches) {
+        try {
+          const overview = await api.overview(address);
+          if (overview.latest_assessment?.assessment_id === assessment.assessment_id && overview.attestation.attested && overview.attestation.data_matches === true) {
+            recordedAttestation = overview.attestation;
+          }
+        } catch { recordedAttestation = null; }
+      }
     }
     if (revision !== renderRevision) return;
-    content.innerHTML = detailSuccess(address, assessment, verification);
+    content.innerHTML = detailSuccess(address, assessment, verification, recordedAttestation);
   } catch (error) {
     if (revision !== renderRevision) return;
     const state = error instanceof ApiError && error.status === 422 ? coverageError(error.body) : null;
@@ -348,6 +343,7 @@ function render(): void {
     try { return decodeURIComponent(part); } catch { return part; }
   });
   if (!segments.length) { void renderDashboard(route.page, revision); return; }
+  if (segments.length === 1 && segments[0] === 'methodology') { renderMethodology(); return; }
   if (segments[0] === 'tokens' && segments[1]) {
     const address = segments[1];
     if (segments[2] === 'assessments' && segments[3]) { void renderAssessmentDetail(address, segments[3], revision); return; }

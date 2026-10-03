@@ -27,19 +27,60 @@ export function assessmentAvailability(status: string | null | undefined, score:
   return 'Assessment available';
 }
 
-export function verificationState(result: {
+export interface VerificationStateInput {
   canonical_valid?: boolean;
   onchain_attested?: boolean;
-  onchain_data_matches?: boolean;
-  onchain?: { configured?: boolean; error?: string };
-} | null): string {
+  onchain_data_matches?: boolean | null;
+  assessment_hash?: string;
+  methodology_version?: string;
+  onchain?: {
+    configured?: boolean;
+    error?: string;
+    contract_address?: string;
+    chain_id?: number;
+    attester?: string;
+    attested_at?: number;
+  };
+}
+
+export function canonicalVerificationState(result: VerificationStateInput | null): string {
+  if (!result || typeof result.canonical_valid !== 'boolean') return 'VERIFICATION UNAVAILABLE';
+  return result.canonical_valid ? 'VALID' : 'INVALID';
+}
+
+export function onchainAttestationState(result: VerificationStateInput | null): string {
+  if (!result) return 'VERIFICATION UNAVAILABLE';
+  if (result.onchain?.configured === false) return 'NOT CONFIGURED';
+  if (result.onchain?.error) return 'VERIFICATION UNAVAILABLE';
+  if (!result.onchain?.configured) return 'VERIFICATION UNAVAILABLE';
+  if (!result.onchain_attested) return 'NOT ATTESTED';
+  if (typeof result.onchain_data_matches !== 'boolean') return 'VERIFICATION UNAVAILABLE';
+  return result.onchain_data_matches ? 'ATTESTED' : 'MISMATCH';
+}
+
+export function onchainMetadata(result: VerificationStateInput | null): Array<[string, string]> {
+  if (!result?.onchain?.configured || result.onchain.error) return [];
+  const fields: Array<[string, string | number | undefined]> = [
+    ['Contract address', result.onchain.contract_address],
+    ['Chain ID', result.onchain.chain_id],
+    ['Attester', result.onchain.attester],
+    ['Attested at', result.onchain.attested_at && result.onchain.attested_at > 0
+      ? new Date(result.onchain.attested_at * 1000).toISOString()
+      : undefined],
+  ];
+  return fields.flatMap(([label, value]) => value === undefined || value === '' ? [] : [[label, String(value)]]);
+}
+
+export function verificationState(result: VerificationStateInput | null): string {
   if (!result) return 'Not checked';
-  if (result.canonical_valid === false) return 'Invalid';
-  if (result.onchain?.configured === false) return 'Valid · not configured';
-  if (result.onchain?.error) return 'Verification unavailable';
-  if (!result.onchain_attested) return 'Valid · not attested';
-  if (!result.onchain_data_matches) return 'Mismatch';
-  return 'Valid · attested';
+  const canonical = canonicalVerificationState(result);
+  if (canonical === 'INVALID') return 'Invalid';
+  const onchain = onchainAttestationState(result);
+  if (onchain === 'NOT CONFIGURED') return 'Valid · not configured';
+  if (onchain === 'NOT ATTESTED') return 'Valid · not attested';
+  if (onchain === 'MISMATCH') return 'Mismatch';
+  if (onchain === 'ATTESTED') return 'Valid · attested';
+  return 'Verification unavailable';
 }
 
 export function routeFromHash(hash: string): { path: string; page: number } {
