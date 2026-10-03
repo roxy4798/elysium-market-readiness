@@ -19,6 +19,22 @@ export interface AssessmentComponents {
   readonly consistencyScore: number;
 }
 
+export interface CanonicalAssessmentPayload {
+  readonly schema_version: '1.0';
+  readonly methodology_version: 'health-v1';
+  readonly token_address: string;
+  readonly assessment_date: string;
+  readonly health_score: number;
+  readonly momentum: number;
+  readonly status: MarketStatus;
+  readonly holder_health: number;
+  readonly transfer_activity: number;
+  readonly address_activity: number;
+  readonly concentration_score: number;
+  readonly consistency_score: number;
+  readonly data_window_days: number;
+}
+
 export interface MarketAssessment {
   readonly tokenAddress: string;
   readonly assessmentDate: string; // YYYY-MM-DD
@@ -28,6 +44,11 @@ export interface MarketAssessment {
   readonly components: AssessmentComponents | null;
   readonly dataWindowDays: number;
   readonly reason: string | null;
+  readonly assessmentId?: string | null;
+  readonly schemaVersion?: string | null;
+  readonly methodologyVersion?: string | null;
+  readonly assessmentHash?: string | null;
+  readonly canonicalPayload?: CanonicalAssessmentPayload | null;
 }
 
 export interface DailyObservation {

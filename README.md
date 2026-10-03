@@ -18,6 +18,7 @@
 - **Phase 1**: ERC-20 Indexer & Onchain Data Layer (COMPLETE)
 - **Phase 2A**: Raw Market Metrics Engine (COMPLETE)
 - **Phase 2B**: Market Health Score V1 & Market Momentum Assessment Engine (COMPLETE)
+- **Phase 3A**: Canonical Assessment & Verification API (COMPLETE)
 
 ### Core Capabilities:
 - **Testnet RPC Connectivity**: Connects directly to **Elysium Testnet** (`Chain ID: 99801`, gas token `HYPE`).
@@ -25,6 +26,7 @@
 - **Strict Onchain Validation**: Multi-call contract checks (`decimals()`, `totalSupply()`, `name()`, `symbol()`), filtering non-ERC20s, NFTs, and reverts.
 - **Deterministic Raw Metrics Engine**: Converts indexed transfers and balances into daily raw market metrics with zero estimates and zero synthetic data.
 - **Deterministic Assessment Engine (Phase 2B)**: Computes Market Health Score (0–100), Market Momentum (-100 to +100), and categorical Status (`EARLY`, `BUILDING`, `DEVELOPING`, `MATURE`, `READY`) with zero future lookahead.
+- **Canonical Verification & REST API (Phase 3A)**: Constructs deterministic canonical assessment payloads, computes unique `keccak256` assessment IDs and `SHA-256` integrity hashes, and serves REST API verification endpoints.
 - **Idempotent PostgreSQL Storage**: Atomic transactional persistence with conflict handling on `transfers`, `daily_metrics`, and `market_assessments`.
 - **Fault-Tolerant Checkpointing**: Durable checkpoint tracking in PostgreSQL allowing clean stop/resume cycles without gaps or re-indexing.
 
@@ -46,7 +48,7 @@
 ```text
 elysium-market-readiness/
 ├── .gitignore                      # Root gitignore (excludes secrets, builds, runtime data)
-├── README.md                       # Architecture, setup, and Phase 1 / 2A / 2B documentation
+├── README.md                       # Architecture, setup, and Phase 1 / 2A / 2B / 3A documentation
 ├── database/
 │   └── schema.sql                  # PostgreSQL idempotent schema & indexes
 └── indexer/
@@ -58,13 +60,15 @@ elysium-market-readiness/
     ├── src/
     │   ├── abi/
     │   │   └── erc20.ts            # Minimal ERC-20 ABI & Transfer event definitions
+    │   ├── api/
+    │   │   └── server.ts           # REST API server & verification endpoints
     │   ├── checkpoint.ts           # Durable checkpointing & safe target block planner
     │   ├── client.ts               # Viem client, RPC retry wrapper & error classifier
     │   ├── config.ts               # Env parsing, validation, and password redactor
     │   ├── database.ts             # PostgreSQL pool & transactional repository
     │   ├── holder-engine.ts        # Pure in-memory accounting & balance anomalies
     │   ├── logger.ts               # Leveled JSON/text console logger
-    │   ├── main.ts                 # CLI entrypoint (run, migrate, doctor, metrics, assess)
+    │   ├── main.ts                 # CLI entrypoint (run, migrate, doctor, metrics, assess, serve)
     │   ├── scanner.ts              # Adaptive log fetcher, pipeline orchestrator
     │   ├── token-validator.ts      # Multi-call ERC-20 validator & bytes32 decoder
     │   ├── transfer-processor.ts   # 3-topic Transfer log decoder & deduplicator
@@ -77,12 +81,14 @@ elysium-market-readiness/
     │   └── assessment/
     │       ├── types.ts            # Assessment interfaces, components & status types
     │       ├── scoring.ts          # Pure scoring functions, weights, interpolation & momentum
+    │       ├── canonical.ts        # Canonical serialization, keccak256 ID & SHA-256 hash
     │       └── assessment-engine.ts# Lookahead-free coordinator & DB upserts
     └── tests/
         ├── checkpoint.test.ts      # Checkpoint persistence and crash recovery tests
         ├── config.test.ts          # Config loading and credential redaction tests
         ├── daily-metrics.test.ts   # 15 deterministic raw metrics & edge case tests
         ├── assessment.test.ts      # 21 deterministic assessment, status & momentum tests
+        ├── canonical.test.ts       # 20 deterministic tests for canonical ID, hash & API
         ├── holder-engine.test.ts   # Invariant and balance accounting tests
         ├── rpc-resilience.test.ts  # Adaptive batching, retry, rate limit tests
         ├── transfer-processor.test.ts # Transfer log decoding and validation tests
@@ -144,6 +150,16 @@ elysium-market-readiness/
 │  3. Status Classifier       ──► EARLY, BUILDING, DEVELOPING, MATURE, READY      │
 │  4. Market Momentum         ──► -100 to +100 activity change vs 7d baseline     │
 │  5. Idempotent Upserter     ──► market_assessments (PK: token_address, date)    │
+└────────────────────────────────────────┬────────────────────────────────────────┘
+                                         │
+┌────────────────────────────────────────┴────────────────────────────────────────┐
+│ Phase 3A: Canonical Assessment & Verification API                               │
+│                                                                                 │
+│  1. Canonical Payload     ──► Deterministic JSON with fixed field ordering      │
+│  2. Assessment ID         ──► keccak256(schema:methodology:token:date)          │
+│  3. Assessment Hash       ──► SHA-256(canonical_serialized_payload)             │
+│  4. REST API Server       ──► GET /v1/tokens/:address/assessment?date=...       │
+│  5. Verification Endpoint ──► GET /v1/assessments/:assessmentId/verify          │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -157,7 +173,7 @@ Defined in [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/dat
 - **`balances`**: `token_address`, `holder_address`, `balance` (`CHECK balance >= 0`), `last_updated_block`. Primary key on `(token_address, holder_address)`.
 - **`indexer_state`**: Single-row checkpoint table storing `last_processed_block` and `updated_at`.
 - **`daily_metrics`**: `token_address`, `date`, `holder_count`, `new_holders`, `active_holders`, `transfer_count`, `unique_senders`, `unique_receivers`, `top1_concentration`, `top5_concentration`, `top10_concentration`, timestamps. Primary key on `(token_address, date)`.
-- **`market_assessments`**: `token_address`, `assessment_date`, `health_score`, `status`, `momentum`, `holder_health`, `transfer_activity`, `address_activity`, `concentration_score`, `consistency_score`, `data_window_days`, `reason`, timestamps. Primary key on `(token_address, assessment_date)`.
+- **`market_assessments`**: `token_address`, `assessment_date`, `health_score`, `status`, `momentum`, `holder_health`, `transfer_activity`, `address_activity`, `concentration_score`, `consistency_score`, `data_window_days`, `reason`, `assessment_id`, `schema_version`, `methodology_version`, `assessment_hash`, timestamps. Primary key on `(token_address, assessment_date)`. Indexes on `assessment_date`, `token_address`, and `assessment_id`.
 
 The database is 100% reproducible from [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/database/schema.sql) and `npm run migrate`.
 
@@ -350,7 +366,156 @@ Data Window: 1 days (minimum 7 required)
 
 ---
 
-## 8. Known RPC Rate-Limit Limitation & Resilience
+## 8. Phase 3A — Canonical Assessment & Verification API
+
+Phase 3A provides a cryptographic and canonical verification layer over the deterministic Phase 2B assessments, accompanied by a production-quality HTTP REST API.
+
+### 1. Architecture & Verification Pipeline
+```text
+Phase 2B Assessment
+       │
+       ▼
+Canonical Payload (13 fixed fields, 2-decimal score precision)
+       │
+       ├──────────────────────────────┐
+       ▼                              ▼
+Assessment ID (keccak256)      Assessment Hash (SHA-256)
+       │                              │
+       └──────────────┬───────────────┘
+                      ▼
+               market_assessments
+                      │
+                      ▼
+             HTTP REST API Server
+    ├── GET /v1/tokens/:address/assessment?date=YYYY-MM-DD
+    └── GET /v1/assessments/:assessmentId/verify
+```
+
+### 2. Canonical Assessment Payload & Fixed Ordering
+To eliminate cross-platform serialization ambiguity, every valid assessment produces a strict canonical payload with fixed field sequence and deterministic decimal precision (`.toFixed(2)` for scores):
+
+```json
+{
+  "schema_version": "1.0",
+  "methodology_version": "health-v1",
+  "token_address": "0x548b43d400cbe3f85cb00f606486291206485036",
+  "assessment_date": "2026-09-22",
+  "health_score": 22.50,
+  "momentum": 0.00,
+  "status": "EARLY",
+  "holder_health": 0.00,
+  "transfer_activity": 50.00,
+  "address_activity": 50.00,
+  "concentration_score": 0.00,
+  "consistency_score": 0.00,
+  "data_window_days": 7
+}
+```
+
+- **Excluded fields**: Current system wall-clock timestamps, random UUIDs, internal database serial IDs, and arbitrary metadata are excluded from the canonical serialization to ensure 100% reproducibility.
+
+### 3. Deterministic Assessment ID (`keccak256`)
+The unique assessment identity is derived deterministically from its identity coordinates using Ethereum standard `keccak256`:
+
+$$\text{assessment\_id} = \text{keccak256}(\text{schema\_version} : \text{methodology\_version} : \text{token\_address} : \text{assessment\_date})$$
+
+- Token addresses are normalized to lowercase before hashing.
+- Any change to the token, date, methodology version, or schema version generates a distinct assessment ID.
+
+### 4. Assessment Integrity Hash (`SHA-256`)
+The cryptographic integrity of the assessment content is captured via:
+
+$$\text{assessment\_hash} = \text{SHA-256}(\text{canonical\_serialized\_payload})$$
+
+- Represented as a lowercase 64-character hexadecimal string.
+- If any score, component, or window is modified, the hash diverges immediately.
+
+### 5. REST API Specification
+
+Run the API server:
+```bash
+npm run serve
+# Or specify port:
+npm run serve -- --port 3000
+```
+
+#### Endpoints:
+
+1. **`GET /v1/tokens/:address/assessment?date=YYYY-MM-DD`**
+   - Retrieves or evaluates the assessment for the given token and UTC calendar date.
+   - **Status Codes**:
+     - `200 OK`: Valid assessment returned with canonical payload, `assessment_id`, and `assessment_hash`.
+     - `400 Bad Request`: Invalid Ethereum address format or invalid date format.
+     - `404 Not Found`: Token not registered in indexed catalog.
+     - `422 Unprocessable Entity`: Token has insufficient historical window ($< 7$ days).
+
+   *Example 200 Response:*
+   ```json
+   {
+     "assessment_id": "0x2cdabbc86a34c27890a226afda3decfe8bc19f88797651a9e57ff8fb62f9077f",
+     "schema_version": "1.0",
+     "methodology_version": "health-v1",
+     "token": {
+       "address": "0x548b43d400cbe3f85cb00f606486291206485036",
+       "symbol": "EBT"
+     },
+     "assessment_date": "2026-09-22",
+     "health_score": 22.5,
+     "momentum": 0.0,
+     "status": "EARLY",
+     "components": {
+       "holder_health": 0.0,
+       "transfer_activity": 50.0,
+       "address_activity": 50.0,
+       "concentration_score": 0.0,
+       "consistency_score": 0.0
+     },
+     "data_window_days": 7,
+     "assessment_hash": "9ab5fd180d003ec685fde08273664ff2f242149a4794f09bcb6bf2bb927d43f2"
+   }
+   ```
+
+   *Example 422 Response (Insufficient Data):*
+   ```json
+   {
+     "error": "INSUFFICIENT_DATA",
+     "reason": "INSUFFICIENT_HISTORICAL_WINDOW",
+     "data_window_days": 2,
+     "token": {
+       "address": "0x7d29d8047b905000459c0e80c34a26ceedcb47b2",
+       "symbol": "USDC"
+     },
+     "assessment_date": "2026-09-22"
+   }
+   ```
+
+2. **`GET /v1/assessments/:assessmentId/verify`**
+   - Independent verification endpoint.
+   - Loads the stored assessment, reconstructs the canonical payload, recalculates `assessment_id` and `assessment_hash`, and verifies match without modifying stored records.
+
+   *Example 200 Response:*
+   ```json
+   {
+     "assessment_id": "0x2cdabbc86a34c27890a226afda3decfe8bc19f88797651a9e57ff8fb62f9077f",
+     "valid": true,
+     "assessment_hash": "9ab5fd180d003ec685fde08273664ff2f242149a4794f09bcb6bf2bb927d43f2",
+     "methodology_version": "health-v1"
+   }
+   ```
+
+3. **`GET /health`**
+   - Liveness probe returning `{"status": "ok"}`.
+
+### 6. Explicit Scope Statement & Non-Claims
+> [!IMPORTANT]
+> - **Not Blockchain Attestation Yet**: Phase 3A establishes offchain canonical serialization, deterministic identity, and HTTP verification. Smart contract onchain attestation is slated for subsequent phases.
+> - **Independent Project**: This software is an independent submission and is **NOT** an official Ascend or Elysium product.
+> - **No Endorsement or Quality Guarantee**: Health Scores, Momentums, and Hashes do **NOT** constitute an official Ascend ranking, endorsement, or approval.
+> - **No Financial Claims**: The system does **NOT** predict token prices or recommend investments.
+
+---
+
+## 9. Known RPC Rate-Limit Limitation & Resilience
 
 The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is hosted on Conduit infrastructure with tight request concurrency boundaries.
 
@@ -366,10 +531,10 @@ The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is ho
 
 ---
 
-## 9. Verification & Quality Assurance
+## 10. Verification & Quality Assurance
 
 ### Automated Test Suite
-The repository includes **92 automated unit and integration tests** across **7 test suites**:
+The repository includes **112 automated unit and integration tests** across **8 test suites**:
 - [tests/config.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/config.test.ts): Environment variable parsing, validation rules, chain ID assertions, and log password masking.
 - [tests/holder-engine.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/holder-engine.test.ts): Mint/burn accounting, self-transfers, zero-balance transitions, and non-negative invariants.
 - [tests/transfer-processor.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/transfer-processor.test.ts): 3-topic Transfer log decoding, data boundary validation, and deduplication.
@@ -377,6 +542,7 @@ The repository includes **92 automated unit and integration tests** across **7 t
 - [tests/rpc-resilience.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/rpc-resilience.test.ts): Exponential backoff with jitter, Conduit `-32017` handling, and adaptive batch halving/growth.
 - [tests/daily-metrics.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/daily-metrics.test.ts): 15 deterministic tests covering all raw metrics, zero address exclusions, self-transfers, concentration ratios, empty dates, idempotency, and UTC boundaries.
 - [tests/assessment.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/assessment.test.ts): 21 deterministic tests covering all 20 Phase 2B audit requirements (holder growth anchors, interpolation, activity anchors, concentration clamping, consistency 0/7 and 7/7, insufficient historical window, exact status boundaries 40/60/75/90, lookahead prevention, idempotency, negative/neutral/positive momentum, and component weighting).
+- [tests/canonical.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/canonical.test.ts): 20 deterministic tests for canonical serialization, fixed field ordering, fixed decimal precision, keccak256 identity, SHA-256 content hashing, tamper detection, HTTP REST API endpoints, 400/404/422 status codes, and verification pipeline.
 
 ```bash
 cd indexer
@@ -386,6 +552,7 @@ npm run build
 npm run doctor
 npm run metrics -- --date 2026-09-22
 npm run assess -- --date 2026-09-22
+npm run serve
 ```
 
 ### Verified Live Testnet & Assessment Results
@@ -394,7 +561,9 @@ npm run assess -- --date 2026-09-22
 - **ERC-20 Contracts Tracked**: `12` contracts (e.g. USDC, PURR, WHYPE, EBT)
 - **Transfer Events Indexed**: `198` real onchain transfers stored
 - **Daily Metrics Calculated**: 33 daily metric rows across 12 calendar days (idempotent upserts)
-- **Assessments Generated**: Idempotently computed and stored in `market_assessments`
+- **Assessments Generated**: Idempotently computed and stored with `assessment_id` and `assessment_hash`
+- **API & Verification**: Verified live on testnet database (`/v1/tokens/:address/assessment` and `/v1/assessments/:id/verify`)
 - **Balance Invariant**: `0` balance anomalies
 - **Doctor Diagnostic**: 100% Passed
+
 

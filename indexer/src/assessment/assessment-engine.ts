@@ -16,10 +16,17 @@ import {
   classifyStatus,
   MIN_HISTORICAL_WINDOW_DAYS,
 } from './scoring.js';
+import {
+  buildCanonicalPayload,
+  computeAssessmentHash,
+  computeAssessmentId,
+  serializeCanonicalAssessment,
+} from './canonical.js';
 import type { DailyObservation, MarketAssessment } from './types.js';
 
 export * from './types.js';
 export * from './scoring.js';
+export * from './canonical.js';
 
 /**
  * Pure evaluation function: computes a Market Assessment from daily observations.
@@ -107,7 +114,7 @@ export function assessToken(
   const status = classifyStatus(healthScore);
   const momentum = calculateMomentum(today, prior7);
 
-  return {
+  const baseAssessment = {
     tokenAddress: tokenAddress.toLowerCase(),
     assessmentDate,
     healthScore,
@@ -116,6 +123,25 @@ export function assessToken(
     components,
     dataWindowDays: prior7.length,
     reason: null,
+  };
+
+  const canonicalPayload = buildCanonicalPayload(baseAssessment);
+  const assessmentId = computeAssessmentId(
+    canonicalPayload.schema_version,
+    canonicalPayload.methodology_version,
+    canonicalPayload.token_address,
+    canonicalPayload.assessment_date,
+  );
+  const serialized = serializeCanonicalAssessment(canonicalPayload);
+  const assessmentHash = computeAssessmentHash(serialized);
+
+  return {
+    ...baseAssessment,
+    assessmentId,
+    schemaVersion: canonicalPayload.schema_version,
+    methodologyVersion: canonicalPayload.methodology_version,
+    assessmentHash,
+    canonicalPayload,
   };
 }
 
@@ -189,9 +215,13 @@ export async function upsertMarketAssessment(
        consistency_score,
        data_window_days,
        reason,
+       assessment_id,
+       schema_version,
+       methodology_version,
+       assessment_hash,
        updated_at
      )
-     VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+     VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
      ON CONFLICT (token_address, assessment_date) DO UPDATE SET
        health_score = EXCLUDED.health_score,
        status = EXCLUDED.status,
@@ -203,6 +233,10 @@ export async function upsertMarketAssessment(
        consistency_score = EXCLUDED.consistency_score,
        data_window_days = EXCLUDED.data_window_days,
        reason = EXCLUDED.reason,
+       assessment_id = EXCLUDED.assessment_id,
+       schema_version = EXCLUDED.schema_version,
+       methodology_version = EXCLUDED.methodology_version,
+       assessment_hash = EXCLUDED.assessment_hash,
        updated_at = NOW()`,
     [
       a.tokenAddress,
@@ -217,6 +251,10 @@ export async function upsertMarketAssessment(
       a.components?.consistencyScore ?? null,
       a.dataWindowDays,
       a.reason,
+      a.assessmentId ?? null,
+      a.schemaVersion ?? null,
+      a.methodologyVersion ?? null,
+      a.assessmentHash ?? null,
     ],
   );
 }

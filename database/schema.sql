@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
 CREATE INDEX IF NOT EXISTS daily_metrics_date_idx ON daily_metrics (date);
 CREATE INDEX IF NOT EXISTS daily_metrics_token_idx ON daily_metrics (token_address);
 
--- Phase 2B: Market Health Score V1 & Momentum assessments
+-- Phase 2B / 3A: Market Health Score V1 & Canonical Verification Assessments
 CREATE TABLE IF NOT EXISTS market_assessments (
     token_address       VARCHAR(42) NOT NULL REFERENCES tokens(address) ON DELETE CASCADE,
     assessment_date     DATE NOT NULL,
@@ -87,10 +87,22 @@ CREATE TABLE IF NOT EXISTS market_assessments (
     consistency_score   NUMERIC(5, 2),
     data_window_days    INTEGER NOT NULL DEFAULT 0,
     reason              TEXT,
+    assessment_id       VARCHAR(66),
+    schema_version      VARCHAR(10),
+    methodology_version VARCHAR(20),
+    assessment_hash     VARCHAR(64),
     created_at          TIMESTAMP DEFAULT NOW(),
     updated_at          TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (token_address, assessment_date)
 );
 
+-- Idempotent schema migrations for Phase 3A
+ALTER TABLE market_assessments ADD COLUMN IF NOT EXISTS assessment_id VARCHAR(66);
+ALTER TABLE market_assessments ADD COLUMN IF NOT EXISTS schema_version VARCHAR(10);
+ALTER TABLE market_assessments ADD COLUMN IF NOT EXISTS methodology_version VARCHAR(20);
+ALTER TABLE market_assessments ADD COLUMN IF NOT EXISTS assessment_hash VARCHAR(64);
+
 CREATE INDEX IF NOT EXISTS market_assessments_date_idx ON market_assessments (assessment_date);
 CREATE INDEX IF NOT EXISTS market_assessments_token_idx ON market_assessments (token_address);
+CREATE INDEX IF NOT EXISTS market_assessments_id_idx ON market_assessments (assessment_id);
+

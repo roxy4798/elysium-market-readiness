@@ -21,6 +21,7 @@ import {
   validateDateString,
 } from './metrics/daily-metrics.js';
 import { runAssessmentsForDate } from './assessment/assessment-engine.js';
+import { startApiServer } from './api/server.js';
 
 const SCHEMA_PATH = fileURLToPath(new URL('../../database/schema.sql', import.meta.url));
 
@@ -489,6 +490,49 @@ Options:
   }
 }
 
+async function cmdServe(config: IndexerConfig): Promise<number> {
+  const argv = process.argv.slice(3);
+  let port = Number(process.env['PORT'] ?? 3000);
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if ((a === '--port' || a === '-p') && argv[i + 1]) port = Number(argv[++i]);
+    else if (a === '--help' || a === '-h') {
+      console.log(`
+Usage: npm run serve [options]
+
+Options:
+  --port, -p <number>  Port to listen on (default: 3000)
+  --help, -h           Show this help message
+`);
+      return 0;
+    }
+  }
+
+  const store = await connectDatabase(config);
+  try {
+    const { port: actualPort } = await startApiServer(store.pool, { port });
+    console.log(`API server listening at http://localhost:${actualPort}`);
+    console.log('Endpoints:');
+    console.log('  GET /v1/tokens/:address/assessment?date=YYYY-MM-DD');
+    console.log('  GET /v1/assessments/:assessmentId/verify');
+    console.log('  GET /health');
+
+    await new Promise<void>((resolve) => {
+      const shutdown = () => {
+        logger.info('shutting down api server');
+        resolve();
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    });
+
+    return 0;
+  } finally {
+    await store.close();
+  }
+}
+
 async function main(): Promise<number> {
   const cmd = process.argv[2] ?? 'run';
   let config: IndexerConfig;
@@ -514,8 +558,10 @@ async function main(): Promise<number> {
       return cmdMetrics(config);
     case 'assess':
       return cmdAssess(config);
+    case 'serve':
+      return cmdServe(config);
     default:
-      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics | assess)`);
+      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics | assess | serve)`);
       return 2;
   }
 }
