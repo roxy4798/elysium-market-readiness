@@ -20,6 +20,7 @@ import {
   loadTokens,
   validateDateString,
 } from './metrics/daily-metrics.js';
+import { runAssessmentsForDate } from './assessment/assessment-engine.js';
 
 const SCHEMA_PATH = fileURLToPath(new URL('../../database/schema.sql', import.meta.url));
 
@@ -397,6 +398,97 @@ Options:
   }
 }
 
+async function cmdAssess(config: IndexerConfig): Promise<number> {
+  const argv = process.argv.slice(3);
+  let targetDate: string | undefined;
+  let tokenFilter: string | undefined;
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--date' && argv[i + 1]) targetDate = argv[++i];
+    else if (a === '--token' && argv[i + 1]) tokenFilter = argv[++i];
+    else if (a === '--help' || a === '-h') {
+      console.log(`
+Usage: npm run assess [options]
+
+Options:
+  --date <YYYY-MM-DD>             Assessment date (UTC calendar date, default: latest indexed date)
+  --token <address>               Filter assessment to a specific token address
+  --help, -h                      Show this help message
+`);
+      return 0;
+    }
+  }
+
+  const store = await connectDatabase(config);
+  try {
+    const bounds = await getIndexedDataBounds(store.pool);
+    if (!targetDate) {
+      if (!bounds.maxDate) {
+        logger.error('no indexed daily metrics found — run npm run metrics first');
+        return 2;
+      }
+      targetDate = bounds.maxDate;
+    }
+
+    const v = validateDateString(targetDate);
+    if (!v.valid) {
+      logger.error(`invalid date: ${v.error}`);
+      return 2;
+    }
+
+    const tokens = await loadTokens(store.pool, tokenFilter);
+    const tokenMap = new Map(tokens.map((t) => [t.address.toLowerCase(), t]));
+
+    const assessments = await runAssessmentsForDate(store.pool, v.normalized, tokenFilter);
+
+    const DIVIDER = '────────────────────────';
+
+    for (const a of assessments) {
+      const tok = tokenMap.get(a.tokenAddress.toLowerCase());
+      const tokenDisplay = tok?.symbol ? `${tok.symbol} (${a.tokenAddress})` : a.tokenAddress;
+
+      console.log(['', 'ASSET ASSESSMENT', DIVIDER].join('\n'));
+      console.log(`Token: ${tokenDisplay}`);
+      console.log(`Date: ${a.assessmentDate}\n`);
+
+      if (a.status === 'INSUFFICIENT_DATA') {
+        console.log('Status: INSUFFICIENT_DATA');
+        console.log(`Reason: ${a.reason ?? 'INSUFFICIENT_HISTORICAL_WINDOW'}`);
+        console.log(`Data Window: ${a.dataWindowDays} days (minimum 7 required)`);
+      } else {
+        const healthStr = a.healthScore !== null ? a.healthScore.toFixed(1) : 'N/A';
+        const momStr =
+          a.momentum !== null ? (a.momentum >= 0 ? `+${a.momentum.toFixed(1)}` : a.momentum.toFixed(1)) : 'N/A';
+
+        console.log(`Market Health: ${healthStr} / 100`);
+        console.log(`Status: ${a.status}`);
+        console.log(`Market Momentum: ${momStr}\n`);
+
+        if (a.components) {
+          console.log('Components:');
+          console.log(`Holder Health: ${a.components.holderHealth.toFixed(1)}`);
+          console.log(`Transfer Activity: ${a.components.transferActivity.toFixed(1)}`);
+          console.log(`Address Activity: ${a.components.addressActivity.toFixed(1)}`);
+          console.log(`Concentration: ${a.components.concentrationScore.toFixed(1)}`);
+          console.log(`Consistency: ${a.components.consistencyScore.toFixed(1)}\n`);
+        }
+
+        console.log(`Data Window: ${a.dataWindowDays} days`);
+      }
+      console.log(DIVIDER);
+    }
+
+    logger.info('assessments completed', {
+      date: v.normalized,
+      count: assessments.length,
+    });
+    return 0;
+  } finally {
+    await store.close();
+  }
+}
+
 async function main(): Promise<number> {
   const cmd = process.argv[2] ?? 'run';
   let config: IndexerConfig;
@@ -420,8 +512,10 @@ async function main(): Promise<number> {
       return cmdMigrate(config);
     case 'metrics':
       return cmdMetrics(config);
+    case 'assess':
+      return cmdAssess(config);
     default:
-      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics)`);
+      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics | assess)`);
       return 2;
   }
 }

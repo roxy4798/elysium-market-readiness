@@ -72,3 +72,25 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
 
 CREATE INDEX IF NOT EXISTS daily_metrics_date_idx ON daily_metrics (date);
 CREATE INDEX IF NOT EXISTS daily_metrics_token_idx ON daily_metrics (token_address);
+
+-- Phase 2B: Market Health Score V1 & Momentum assessments
+CREATE TABLE IF NOT EXISTS market_assessments (
+    token_address       VARCHAR(42) NOT NULL REFERENCES tokens(address) ON DELETE CASCADE,
+    assessment_date     DATE NOT NULL,
+    health_score        NUMERIC(5, 2),
+    status              VARCHAR(20) NOT NULL,
+    momentum            NUMERIC(5, 2),
+    holder_health       NUMERIC(5, 2),
+    transfer_activity   NUMERIC(5, 2),
+    address_activity    NUMERIC(5, 2),
+    concentration_score NUMERIC(5, 2),
+    consistency_score   NUMERIC(5, 2),
+    data_window_days    INTEGER NOT NULL DEFAULT 0,
+    reason              TEXT,
+    created_at          TIMESTAMP DEFAULT NOW(),
+    updated_at          TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (token_address, assessment_date)
+);
+
+CREATE INDEX IF NOT EXISTS market_assessments_date_idx ON market_assessments (assessment_date);
+CREATE INDEX IF NOT EXISTS market_assessments_token_idx ON market_assessments (token_address);

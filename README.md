@@ -17,14 +17,15 @@
 **Current Status:**
 - **Phase 1**: ERC-20 Indexer & Onchain Data Layer (COMPLETE)
 - **Phase 2A**: Raw Market Metrics Engine (COMPLETE)
-- *(Phase 2B/3 scoring engine, Health Score, Momentum Score, and rankings belong to subsequent phases and are NOT present in this repository.)*
+- **Phase 2B**: Market Health Score V1 & Market Momentum Assessment Engine (COMPLETE)
 
 ### Core Capabilities:
 - **Testnet RPC Connectivity**: Connects directly to **Elysium Testnet** (`Chain ID: 99801`, gas token `HYPE`).
 - **ERC-20 Event Indexer**: Discovers, decodes, and indexes onchain `Transfer(address,address,uint256)` event logs.
 - **Strict Onchain Validation**: Multi-call contract checks (`decimals()`, `totalSupply()`, `name()`, `symbol()`), filtering non-ERC20s, NFTs, and reverts.
 - **Deterministic Raw Metrics Engine**: Converts indexed transfers and balances into daily raw market metrics with zero estimates and zero synthetic data.
-- **Idempotent PostgreSQL Storage**: Atomic transactional persistence with conflict handling on `transfers` and `daily_metrics`.
+- **Deterministic Assessment Engine (Phase 2B)**: Computes Market Health Score (0–100), Market Momentum (-100 to +100), and categorical Status (`EARLY`, `BUILDING`, `DEVELOPING`, `MATURE`, `READY`) with zero future lookahead.
+- **Idempotent PostgreSQL Storage**: Atomic transactional persistence with conflict handling on `transfers`, `daily_metrics`, and `market_assessments`.
 - **Fault-Tolerant Checkpointing**: Durable checkpoint tracking in PostgreSQL allowing clean stop/resume cycles without gaps or re-indexing.
 
 ---
@@ -45,7 +46,7 @@
 ```text
 elysium-market-readiness/
 ├── .gitignore                      # Root gitignore (excludes secrets, builds, runtime data)
-├── README.md                       # Architecture, setup, and Phase 1 / 2A documentation
+├── README.md                       # Architecture, setup, and Phase 1 / 2A / 2B documentation
 ├── database/
 │   └── schema.sql                  # PostgreSQL idempotent schema & indexes
 └── indexer/
@@ -63,20 +64,25 @@ elysium-market-readiness/
     │   ├── database.ts             # PostgreSQL pool & transactional repository
     │   ├── holder-engine.ts        # Pure in-memory accounting & balance anomalies
     │   ├── logger.ts               # Leveled JSON/text console logger
-    │   ├── main.ts                 # CLI entrypoint (run, migrate, doctor, metrics)
+    │   ├── main.ts                 # CLI entrypoint (run, migrate, doctor, metrics, assess)
     │   ├── scanner.ts              # Adaptive log fetcher, pipeline orchestrator
     │   ├── token-validator.ts      # Multi-call ERC-20 validator & bytes32 decoder
     │   ├── transfer-processor.ts   # 3-topic Transfer log decoder & deduplicator
-    │   └── metrics/
-    │       ├── types.ts            # Metrics data structures & Transfer interfaces
-    │       ├── activity-metrics.ts # Transfer count, senders, receivers, active holders
-    │       ├── holder-metrics.ts   # End-of-day holder count & new holder detection
-    │       ├── concentration-metrics.ts # Onchain holder concentration (Top 1, 5, 10)
-    │       └── daily-metrics.ts    # Coordinator, date boundaries, and DB upserts
+    │   ├── metrics/
+    │   │   ├── types.ts            # Metrics data structures & Transfer interfaces
+    │   │   ├── activity-metrics.ts # Transfer count, senders, receivers, active holders
+    │   │   ├── holder-metrics.ts   # End-of-day holder count & new holder detection
+    │   │   ├── concentration-metrics.ts # Onchain holder concentration (Top 1, 5, 10)
+    │   │   └── daily-metrics.ts    # Coordinator, date boundaries, and DB upserts
+    │   └── assessment/
+    │       ├── types.ts            # Assessment interfaces, components & status types
+    │       ├── scoring.ts          # Pure scoring functions, weights, interpolation & momentum
+    │       └── assessment-engine.ts# Lookahead-free coordinator & DB upserts
     └── tests/
         ├── checkpoint.test.ts      # Checkpoint persistence and crash recovery tests
         ├── config.test.ts          # Config loading and credential redaction tests
         ├── daily-metrics.test.ts   # 15 deterministic raw metrics & edge case tests
+        ├── assessment.test.ts      # 21 deterministic assessment, status & momentum tests
         ├── holder-engine.test.ts   # Invariant and balance accounting tests
         ├── rpc-resilience.test.ts  # Adaptive batching, retry, rate limit tests
         ├── transfer-processor.test.ts # Transfer log decoding and validation tests
@@ -117,6 +123,7 @@ elysium-market-readiness/
                      │  - balances (CHECK balance >= 0)       │
                      │  - indexer_state (checkpoint)          │
                      │  - daily_metrics (PK: token, date)     │
+                     │  - market_assessments (PK: token, date)│
                      └───────────────────┬────────────────────┘
                                          │
 ┌────────────────────────────────────────┴────────────────────────────────────────┐
@@ -126,6 +133,17 @@ elysium-market-readiness/
 │  2. Holder Balance Engine ──► end-of-day holder_count (> 0) & new_holders (0->+)│
 │  3. Concentration Engine  ──► top1, top5, top10 onchain holder concentration   │
 │  4. Idempotent Upserter   ──► ON CONFLICT (token_address, date) DO UPDATE       │
+└────────────────────────────────────────┬────────────────────────────────────────┘
+                                         │
+┌────────────────────────────────────────┴────────────────────────────────────────┐
+│ Phase 2B: Market Health Score V1 & Momentum Assessment Engine                  │
+│                                                                                 │
+│  1. Rolling Median Baseline ──► 7-day median for transfers, active & new holders│
+│  2. Component Evaluator     ──► Holder (25%), Transfers (25%), Active (20%),   │
+│                                 Concentration (20%), Consistency (10%)          │
+│  3. Status Classifier       ──► EARLY, BUILDING, DEVELOPING, MATURE, READY      │
+│  4. Market Momentum         ──► -100 to +100 activity change vs 7d baseline     │
+│  5. Idempotent Upserter     ──► market_assessments (PK: token_address, date)    │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -139,6 +157,7 @@ Defined in [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/dat
 - **`balances`**: `token_address`, `holder_address`, `balance` (`CHECK balance >= 0`), `last_updated_block`. Primary key on `(token_address, holder_address)`.
 - **`indexer_state`**: Single-row checkpoint table storing `last_processed_block` and `updated_at`.
 - **`daily_metrics`**: `token_address`, `date`, `holder_count`, `new_holders`, `active_holders`, `transfer_count`, `unique_senders`, `unique_receivers`, `top1_concentration`, `top5_concentration`, `top10_concentration`, timestamps. Primary key on `(token_address, date)`.
+- **`market_assessments`**: `token_address`, `assessment_date`, `health_score`, `status`, `momentum`, `holder_health`, `transfer_activity`, `address_activity`, `concentration_score`, `consistency_score`, `data_window_days`, `reason`, timestamps. Primary key on `(token_address, assessment_date)`.
 
 The database is 100% reproducible from [database/schema.sql](file:///c:/ELYSIUM/elysium-market-readiness/database/schema.sql) and `npm run migrate`.
 
@@ -189,54 +208,149 @@ npm run metrics -- --date 2026-09-22 --token 0x7d29d8047b905000459c0e80c34a26cee
 npm run metrics -- --help
 ```
 
-### Example CLI Output:
-```text
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ELYSIUM DAILY METRICS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+---
 
-Date:
-2026-09-22
+## 7. Phase 2B — Market Health Score V1 & Market Momentum
 
-Token:
-USDC
+Phase 2B implements a deterministic assessment engine on top of `daily_metrics`. It converts validated onchain activity into:
+1. **Market Health Score**: `0–100`
+2. **Market Momentum**: `-100` to `+100`
+3. **Status Classification**: `EARLY`, `BUILDING`, `DEVELOPING`, `MATURE`, `READY`
 
-Holders:
-49
+### 1. Health Score Methodology & Component Weights
+The final health score is a weighted linear combination of five normalized components (`0–100`):
 
-New Holders:
-49
+$$\text{health\_score} = (\text{holder\_health} \times 0.25) + (\text{transfer\_activity} \times 0.25) + (\text{address\_activity} \times 0.20) + (\text{concentration\_score} \times 0.20) + (\text{consistency\_score} \times 0.10)$$
 
-Active Holders:
-50
+| Component | Weight | Underlying Metric / Baseline | Purpose |
+|---|---|---|---|
+| **Holder Health** | **25%** | $\frac{\text{new\_holders}}{\text{previous\_holder\_count}}$ | Measures daily holder base growth rate |
+| **Transfer Activity** | **25%** | $\frac{\text{today\_transfer\_count}}{\text{median\_7d\_transfer\_count}}$ | Measures token velocity vs 7-day rolling median |
+| **Address Activity** | **20%** | $\frac{\text{today\_active\_holders}}{\text{median\_7d\_active\_holders}}$ | Measures active network participants vs 7-day median |
+| **Holder Concentration** | **20%** | $100 \times (1 - \text{Risk})$ | Rewards decentralization of onchain balances |
+| **Activity Consistency** | **10%** | $\frac{\text{active\_days}}{7} \times 100$ | Rewards sustained daily activity over 7 completed days |
 
-Transfers:
-78
+### 2. Normalization Anchors & Linear Interpolation
+All component scores are interpolated linearly between predefined anchor points and clamped to `[0, 100]`:
 
-Unique Senders:
-9
+- **Holder Health Anchors** (Daily Growth %):
+  - `0%` $\rightarrow$ `0`
+  - `5%` $\rightarrow$ `25`
+  - `10%` $\rightarrow$ `50`
+  - `20%` $\rightarrow$ `75`
+  - `30%+` $\rightarrow$ `100` (capped at 100; extreme growth never exceeds 100)
+  - *If historical holder baseline is unavailable, reports `INSUFFICIENT_DATA` rather than fabricating a score.*
 
-Unique Receivers:
-50
+- **Transfer Activity & Address Activity Anchors** (Ratio vs 7-day rolling median):
+  - `0.0x` $\rightarrow$ `0`
+  - `0.5x` $\rightarrow$ `25`
+  - `1.0x` $\rightarrow$ `50` (baseline activity matches historical median)
+  - `2.0x` $\rightarrow$ `75`
+  - `3.0x+` $\rightarrow$ `100` (capped at 100)
+  - *Prevents hardcoded absolute transfer thresholds across tokens of different scales.*
 
-Top 1:
-0.36
+- **Onchain Holder Concentration Score**:
+  $$\text{Risk} = 0.50 \times \text{top1} + 0.30 \times \text{top5} + 0.20 \times \text{top10}$$
+  $$\text{Score} = 100 \times (1 - \text{Risk})$$
+  - Clamped strictly to `[0, 100]`.
+  - Terminology: strictly referred to as **"onchain holder concentration"**, recognizing that one entity may control multiple addresses.
 
-Top 5:
-0.92
+- **Activity Consistency Score**:
+  $$\text{Score} = \left(\frac{\text{active\_days}}{7}\right) \times 100$$
+  - Evaluates the previous 7 completed daily observations where $\text{transfer\_count} > 0$.
+  - Example: `0/7` $\rightarrow$ `0.0`, `1/7` $\rightarrow$ `14.3`, ..., `7/7` $\rightarrow$ `100.0`.
 
-Top 10:
-0.94
+### 3. Minimum Historical Window Requirement
+- **Requirement**: Minimum **7 completed daily observations** strictly prior to the assessment date.
+- If fewer than 7 historical observations exist:
+  - `health_score = NULL`
+  - `status = INSUFFICIENT_DATA`
+  - `reason = INSUFFICIENT_HISTORICAL_WINDOW`
+- Missing historical data is **never replaced with zero** or fabricated estimates.
 
-Status:
-CALCULATED
+### 4. Status Boundaries
+Scores map deterministically into exactly 5 status labels:
+- `0–39`: **`EARLY`**
+- `40–59`: **`BUILDING`**
+- `60–74`: **`DEVELOPING`**
+- `75–89`: **`MATURE`**
+- `90–100`: **`READY`**
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+### 5. Market Momentum Definition
+- **What it is**: Market Momentum measures the rate of change in **onchain market activity** relative to the token's 7-day rolling baseline across three dimensions:
+  1. `transfer_count` vs 7-day rolling median
+  2. `active_holders` vs 7-day rolling median
+  3. `new_holders` vs 7-day rolling median
+- **Normalization**: Normalized strictly to `[-100, +100]`:
+  - **Negative (`< 0`)**: Activity is weakening relative to baseline.
+  - **Zero (`0.0`)**: Activity is stable near baseline.
+  - **Positive (`> 0`)**: Activity is strengthening relative to baseline.
+- **CRITICAL**: **Market Momentum is NOT price momentum.** It carries zero directional financial prediction.
+
+### 6. Strict Data Integrity & Lookahead Prevention
+- **No Lookahead Leakage**: Assessments strictly query observations dated `< assessmentDate` when constructing the 7-day rolling baseline and consistency window.
+- **Historical Immutability**: Historical assessments always utilize historical `daily_metrics` snapshot states, never current wallet balances.
+- **Pure Determinism**: Identical database state + identical assessment date will always yield identical results without wall-clock drift or randomness.
+
+### 7. CLI Usage
+```bash
+# Run assessment for all tokens on a specific UTC date:
+npm run assess -- --date 2026-09-22
+
+# Filter assessment to a specific token:
+npm run assess -- --date 2026-09-22 --token 0x548b11fbcf18216335a1215440cbfa48682a0d0a
+
+# Default to latest indexed date:
+npm run assess
 ```
+
+#### Example Output (Sufficient History):
+```text
+ASSET ASSESSMENT
+────────────────────────
+Token: EBT (0x548b11fbcf18216335a1215440cbfa48682a0d0a)
+Date: 2026-09-22
+
+Market Health: 66.5 / 100
+Status: DEVELOPING
+Market Momentum: +42.0
+
+Components:
+Holder Health: 75.0
+Transfer Activity: 80.0
+Address Activity: 65.0
+Concentration: 40.0
+Consistency: 85.7
+
+Data Window: 7 days
+────────────────────────
+```
+
+#### Example Output (Insufficient History):
+```text
+ASSET ASSESSMENT
+────────────────────────
+Token: USDC (0x7d29d8047b905000459c0e80c34a26ceedcb47b2)
+Date: 2026-09-22
+
+Status: INSUFFICIENT_DATA
+Reason: INSUFFICIENT_HISTORICAL_WINDOW
+Data Window: 1 days (minimum 7 required)
+────────────────────────
+```
+
+### 8. Explicit Disclaimers & Non-Goals
+> [!WARNING]
+> - **Independent Project**: This software is an independent submission and is **NOT** an official Ascend or Elysium product.
+> - **Not an Approval or Ranking**: Health Scores and Statuses do **NOT** constitute an official Ascend ranking, endorsement, or approval.
+> - **Zero Price/Success Prediction**: Market Health and Momentum do **NOT** predict token prices, token market caps, or project success.
+> - **Not a Trading Strategy**: This engine does **NOT** generate buy/sell signals and must never be used as investment advice.
+> - **No External Market Data**: The engine relies 100% on verifiable onchain event logs; it does not consume DEX liquidity, CEX volumes, or offchain pricing.
+> - **No HyperCore Dependency**: Operates independently of HyperCore consensus internals.
 
 ---
 
-## 7. Known RPC Rate-Limit Limitation & Resilience
+## 8. Known RPC Rate-Limit Limitation & Resilience
 
 The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is hosted on Conduit infrastructure with tight request concurrency boundaries.
 
@@ -252,16 +366,17 @@ The Elysium Testnet public RPC (`https://testnet-rpc.elysium.kinetiq.xyz`) is ho
 
 ---
 
-## 8. Verification & Quality Assurance
+## 9. Verification & Quality Assurance
 
 ### Automated Test Suite
-The repository includes 71 automated unit and integration tests across 6 test suites:
+The repository includes **92 automated unit and integration tests** across **7 test suites**:
 - [tests/config.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/config.test.ts): Environment variable parsing, validation rules, chain ID assertions, and log password masking.
 - [tests/holder-engine.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/holder-engine.test.ts): Mint/burn accounting, self-transfers, zero-balance transitions, and non-negative invariants.
 - [tests/transfer-processor.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/transfer-processor.test.ts): 3-topic Transfer log decoding, data boundary validation, and deduplication.
 - [tests/checkpoint.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/checkpoint.test.ts): Crash recovery, transaction atomicity, idempotent resume, and target range planning.
 - [tests/rpc-resilience.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/rpc-resilience.test.ts): Exponential backoff with jitter, Conduit `-32017` handling, and adaptive batch halving/growth.
 - [tests/daily-metrics.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/daily-metrics.test.ts): 15 deterministic tests covering all raw metrics, zero address exclusions, self-transfers, concentration ratios, empty dates, idempotency, and UTC boundaries.
+- [tests/assessment.test.ts](file:///c:/ELYSIUM/elysium-market-readiness/indexer/tests/assessment.test.ts): 21 deterministic tests covering all 20 Phase 2B audit requirements (holder growth anchors, interpolation, activity anchors, concentration clamping, consistency 0/7 and 7/7, insufficient historical window, exact status boundaries 40/60/75/90, lookahead prevention, idempotency, negative/neutral/positive momentum, and component weighting).
 
 ```bash
 cd indexer
@@ -270,13 +385,16 @@ npm run typecheck
 npm run build
 npm run doctor
 npm run metrics -- --date 2026-09-22
+npm run assess -- --date 2026-09-22
 ```
 
-### Verified Live Testnet & Metrics Results
+### Verified Live Testnet & Assessment Results
 - **Chain ID**: `99801` (Verified onchain)
 - **Blocks Scanned**: Blocks `0` through `30,000`
 - **ERC-20 Contracts Tracked**: `12` contracts (e.g. USDC, PURR, WHYPE, EBT)
 - **Transfer Events Indexed**: `198` real onchain transfers stored
 - **Daily Metrics Calculated**: 33 daily metric rows across 12 calendar days (idempotent upserts)
+- **Assessments Generated**: Idempotently computed and stored in `market_assessments`
 - **Balance Invariant**: `0` balance anomalies
 - **Doctor Diagnostic**: 100% Passed
+

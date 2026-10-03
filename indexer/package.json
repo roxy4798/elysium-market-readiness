@@ -14,6 +14,7 @@
     "migrate": "tsx src/main.ts migrate",
     "doctor": "tsx src/main.ts doctor",
     "metrics": "tsx src/main.ts metrics",
+    "assess": "tsx src/main.ts assess",
     "test": "vitest run",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json"
