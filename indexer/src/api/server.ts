@@ -24,6 +24,55 @@ import {
   CanonicalVerificationError,
 } from '../attestation/attestation-service.js';
 import { logger } from '../logger.js';
+import { ELYSIUM_TESTNET_CHAIN_ID } from '../config.js';
+
+const DEFAULT_PAGE_SIZE = 25;
+const MAX_PAGE_SIZE = 100;
+
+function pagination(url: URL): { page: number; limit: number; offset: number } | null {
+  const rawPage = url.searchParams.get('page') ?? '1';
+  const rawLimit = url.searchParams.get('limit') ?? String(DEFAULT_PAGE_SIZE);
+  if (!/^\d+$/.test(rawPage) || !/^\d+$/.test(rawLimit)) return null;
+  const page = Number(rawPage);
+  const limit = Number(rawLimit);
+  if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger(limit) || limit < 1) return null;
+  const boundedLimit = Math.min(limit, MAX_PAGE_SIZE);
+  const offset = (page - 1) * boundedLimit;
+  if (!Number.isSafeInteger(offset)) return null;
+  return { page, limit: boundedLimit, offset };
+}
+
+function dateFilters(url: URL): { from: string | null; to: string | null } | null {
+  const from = url.searchParams.get('from');
+  const to = url.searchParams.get('to');
+  for (const date of [from, to]) {
+    if (date !== null && !validateDateString(date).valid) return null;
+  }
+  if (from && to && from > to) return null;
+  return { from, to };
+}
+
+function canonicalAssessment(row: Record<string, unknown>) {
+  return {
+    assessment_id: row.assessment_id,
+    schema_version: row.schema_version ?? CURRENT_SCHEMA_VERSION,
+    methodology_version: row.methodology_version ?? CURRENT_METHODOLOGY_VERSION,
+    token: { address: row.token_address, symbol: row.symbol ?? row.name ?? row.token_address },
+    assessment_date: row.assessment_date,
+    health_score: row.health_score === null ? null : Number(row.health_score),
+    momentum: row.momentum === null ? null : Number(row.momentum),
+    status: row.status,
+    components: {
+      holder_health: row.holder_health === null ? null : Number(row.holder_health),
+      transfer_activity: row.transfer_activity === null ? null : Number(row.transfer_activity),
+      address_activity: row.address_activity === null ? null : Number(row.address_activity),
+      concentration_score: row.concentration_score === null ? null : Number(row.concentration_score),
+      consistency_score: row.consistency_score === null ? null : Number(row.consistency_score),
+    },
+    data_window_days: Number(row.data_window_days),
+    assessment_hash: row.assessment_hash,
+  };
+}
 
 export interface ServerOptions {
   port?: number;
@@ -76,6 +125,111 @@ export async function handleRequest(
     // Health check
     if (pathname === '/health' || pathname === '/v1/health') {
       sendJson(res, 200, { status: 'ok' });
+      return;
+    }
+
+    // Dashboard token discovery: one query obtains each token and its latest persisted assessment.
+    if (pathname === '/v1/tokens' && req.method === 'GET') {
+      const page = pagination(parsedUrl);
+      if (!page) { sendError(res, 400, 'Invalid page or limit'); return; }
+      const result = await pool.query<Record<string, unknown>>(
+        `SELECT t.address, t.symbol, t.name, t.decimals, t.total_supply::text AS total_supply,
+                a.assessment_date::text AS latest_assessment_date, a.health_score, a.momentum, a.status
+         FROM tokens t
+         LEFT JOIN LATERAL (
+           SELECT assessment_date, health_score, momentum, status FROM market_assessments
+           WHERE token_address = t.address ORDER BY assessment_date DESC LIMIT 1
+         ) a ON TRUE
+         ORDER BY t.address ASC LIMIT $1 OFFSET $2`, [page.limit, page.offset]);
+      const count = await pool.query<{ total: string }>('SELECT COUNT(*)::text AS total FROM tokens');
+      sendJson(res, 200, { tokens: result.rows.map((r) => ({
+        address: r.address, symbol: r.symbol, name: r.name, decimals: r.decimals,
+        total_supply: r.total_supply, latest_assessment_date: r.latest_assessment_date,
+        health_score: r.health_score === null ? null : Number(r.health_score),
+        momentum: r.momentum === null ? null : Number(r.momentum), status: r.status,
+      })), page: page.page, limit: page.limit, total: Number(count.rows[0]?.total ?? 0) });
+      return;
+    }
+
+    const dashboardRoute = /^\/v1\/tokens\/([^/]+)\/(overview|assessments|metrics|momentum)\/?$/.exec(pathname);
+    if (dashboardRoute && req.method === 'GET') {
+      const rawAddress = dashboardRoute[1]!;
+      if (!isAddress(rawAddress)) { sendError(res, 400, 'Invalid Ethereum address format'); return; }
+      const address = rawAddress.toLowerCase();
+      const route = dashboardRoute[2]!;
+      const tokenResult = await pool.query<Record<string, unknown>>(
+        'SELECT address, name, symbol, decimals, total_supply::text AS total_supply FROM tokens WHERE address = $1 LIMIT 1', [address]);
+      if (!tokenResult.rows.length) { sendError(res, 404, 'Token not found'); return; }
+      const token = tokenResult.rows[0]!;
+
+      if (route === 'overview') {
+        const assessmentResult = await pool.query<Record<string, unknown>>(
+          `SELECT a.token_address, a.assessment_date::text AS assessment_date, a.health_score, a.momentum, a.status,
+                  a.holder_health, a.transfer_activity, a.address_activity, a.concentration_score, a.consistency_score,
+                  a.data_window_days, a.assessment_id, a.schema_version, a.methodology_version, a.assessment_hash,
+                  t.name, t.symbol
+           FROM market_assessments a JOIN tokens t ON t.address = a.token_address
+           WHERE a.token_address = $1 ORDER BY a.assessment_date DESC LIMIT 1`, [address]);
+        const metricResult = await pool.query<Record<string, unknown>>(
+          `SELECT date::text AS date, holder_count, new_holders, active_holders, transfer_count,
+                unique_senders, unique_receivers, top1_concentration, top5_concentration, top10_concentration
+           FROM daily_metrics WHERE token_address = $1 ORDER BY date DESC LIMIT 1`, [address]);
+        const assessment = assessmentResult.rows[0] ? canonicalAssessment({ ...assessmentResult.rows[0], token_address: address }) : null;
+        const configuredContract = process.env['ATTESTATION_CONTRACT_ADDRESS'];
+        const isConfigured = Boolean(configuredContract && isAddress(configuredContract));
+        let attestation: Record<string, unknown> = { configured: isConfigured, attested: false, data_matches: false,
+          contract_address: isConfigured ? configuredContract : null, chain_id: Number(process.env['CHAIN_ID'] ?? ELYSIUM_TESTNET_CHAIN_ID),
+          transaction_hash: null, block_number: null };
+        if (assessmentResult.rows[0]?.assessment_id) {
+          const saved = await pool.query<Record<string, unknown>>(
+            `SELECT contract_address, chain_id, transaction_hash, block_number FROM assessment_attestations WHERE LOWER(assessment_id)=LOWER($1) LIMIT 1`,
+            [assessmentResult.rows[0].assessment_id]);
+          if (saved.rows[0]) {
+            attestation = { ...attestation, attested: true, contract_address: saved.rows[0].contract_address,
+              chain_id: Number(saved.rows[0].chain_id), transaction_hash: saved.rows[0].transaction_hash, block_number: Number(saved.rows[0].block_number) };
+            if (isConfigured) {
+              try {
+                const check = await verifyAssessment(pool, String(assessmentResult.rows[0].assessment_id));
+                attestation.data_matches = check.onchain_attested ? check.onchain_data_matches : null;
+                if (check.onchain_attested && !check.onchain_data_matches) attestation.mismatch = true;
+              } catch { attestation.data_matches = null; }
+            }
+          }
+        }
+        sendJson(res, 200, { token, latest_assessment: assessment, latest_metrics: metricResult.rows[0] ?? null, attestation });
+        return;
+      }
+
+      const page = pagination(parsedUrl);
+      const dates = dateFilters(parsedUrl);
+      if (!page || !dates) { sendError(res, 400, 'Invalid page, limit, or date filter'); return; }
+      const table = route === 'assessments' || route === 'momentum' ? 'market_assessments' : 'daily_metrics';
+      const totalResult = await pool.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM ${table} WHERE token_address=$1 AND ($2::date IS NULL OR ${route === 'metrics' ? 'date' : 'assessment_date'} >= $2::date) AND ($3::date IS NULL OR ${route === 'metrics' ? 'date' : 'assessment_date'} <= $3::date)`, [address, dates.from, dates.to]);
+      if (route === 'assessments') {
+        const rows = await pool.query<Record<string, unknown>>(
+          `SELECT a.token_address, a.assessment_date::text AS assessment_date, a.health_score, a.momentum, a.status,
+                  a.holder_health, a.transfer_activity, a.address_activity, a.concentration_score, a.consistency_score,
+                  a.data_window_days, a.assessment_id, a.schema_version, a.methodology_version, a.assessment_hash,
+                  t.name, t.symbol
+           FROM market_assessments a JOIN tokens t ON t.address=a.token_address
+           WHERE a.token_address=$1 AND ($2::date IS NULL OR assessment_date >= $2::date) AND ($3::date IS NULL OR assessment_date <= $3::date)
+           ORDER BY a.assessment_date DESC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
+        sendJson(res, 200, { assessments: rows.rows.map(canonicalAssessment), page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) });
+      } else if (route === 'momentum') {
+        const rows = await pool.query<{ date: string; value: string | null }>(
+          `SELECT assessment_date::text AS date, momentum::text AS value FROM market_assessments
+           WHERE token_address=$1 AND ($2::date IS NULL OR assessment_date >= $2::date) AND ($3::date IS NULL OR assessment_date <= $3::date)
+           ORDER BY assessment_date ASC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
+        sendJson(res, 200, { momentum: rows.rows.map((r) => ({ date: r.date, value: r.value === null ? null : Number(r.value) })), page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) });
+      } else {
+        const rows = await pool.query<Record<string, unknown>>(
+          `SELECT date::text AS date, holder_count, new_holders, active_holders, transfer_count, unique_senders, unique_receivers,
+                  top1_concentration, top5_concentration, top10_concentration FROM daily_metrics
+           WHERE token_address=$1 AND ($2::date IS NULL OR date >= $2::date) AND ($3::date IS NULL OR date <= $3::date)
+           ORDER BY date ASC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
+        sendJson(res, 200, { metrics: rows.rows, page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) });
+      }
       return;
     }
 
