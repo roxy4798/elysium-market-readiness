@@ -122,3 +122,65 @@ test('responsive styles adapt navigation, token discovery, overview, and history
   assert.match(css, /\.method-flow\s*\{/);
   assert.match(css, /\.trust-stack\s*\{/);
 });
+
+test('Phase 5C: public verification UX renders complete onchain hierarchy, copy buttons, and explorer link', () => {
+  const verifiedState = {
+    assessment_id: '0x2ffe882456f2f43d66ce8c4049d55bcacf80a1393afc2cd467a746cec4d18ef3',
+    canonical_valid: true,
+    onchain_attested: true,
+    onchain_data_matches: true,
+    assessment_hash: '180f144a819cdcd22d9244feef524dc7f75a80f73505410b9e2efba78d05193c',
+    methodology_version: 'health-v1',
+    onchain: {
+      configured: true,
+      contract_address: '0x149832ec7f9eb3729ec1682b86e026c0af5a9d61',
+      chain_id: 99801,
+      attester: '0xfa438c93705aa9AD78f9EDdca0db140F198fE3C9',
+      attested_at: 1791089978,
+    },
+  };
+
+  const recordedAttestation = {
+    contract_address: '0x149832ec7f9eb3729ec1682b86e026c0af5a9d61',
+    chain_id: 99801,
+    transaction_hash: '0x35ae5707f0fa98b758afa5a486be6ef5a9f71f43efe73437169a7872f2debd79',
+    block_number: 2492705,
+  };
+
+  const html = verificationFlowHtml(verifiedState, recordedAttestation);
+
+  // Verification step hierarchy
+  assert.match(html, /2 · CANONICAL VERIFICATION/);
+  assert.match(html, /3 · ONCHAIN ATTESTATION/);
+  assert.match(html, /VALID/);
+  assert.match(html, /ATTESTED/);
+
+  // Exact fields
+  assert.match(html, /Elysium Testnet/);
+  assert.match(html, /99801/);
+  assert.match(html, /0x149832ec7f9eb3729ec1682b86e026c0af5a9d61/);
+  assert.match(html, /0x35ae5707f0fa98b758afa5a486be6ef5a9f71f43efe73437169a7872f2debd79/);
+  assert.match(html, /2492705/);
+  assert.match(html, /0xfa438c93705aa9AD78f9EDdca0db140F198fE3C9/);
+
+  // Copy buttons
+  assert.match(html, /data-copy="0x2ffe882456f2f43d66ce8c4049d55bcacf80a1393afc2cd467a746cec4d18ef3"/);
+  assert.match(html, /data-copy="180f144a819cdcd22d9244feef524dc7f75a80f73505410b9e2efba78d05193c"/);
+  assert.match(html, /data-copy="0x149832ec7f9eb3729ec1682b86e026c0af5a9d61"/);
+  assert.match(html, /data-copy="0x35ae5707f0fa98b758afa5a486be6ef5a9f71f43efe73437169a7872f2debd79"/);
+  assert.match(html, /data-copy="0xfa438c93705aa9AD78f9EDdca0db140F198fE3C9"/);
+
+  // Official explorer link
+  assert.match(html, /https:\/\/elysium\.kinetiq\.xyz\/testnet-explorer/);
+  assert.match(html, /Official Elysium Testnet Explorer/);
+
+  // Verification language
+  assert.match(html, /Canonical assessment verified/);
+  assert.match(html, /Onchain attestation verified/);
+  assert.match(html, /Assessment data matches the attested record/);
+
+  // Methodology requirements
+  assert.match(methodologyPageHtml, /NOT a trading signal/);
+  assert.match(methodologyPageHtml, /Health Score is NOT a safety score/);
+  assert.match(methodologyPageHtml, /Concentration is based on onchain balances, not investor identity/);
+});

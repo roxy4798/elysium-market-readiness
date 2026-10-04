@@ -28,6 +28,7 @@ export function assessmentAvailability(status: string | null | undefined, score:
 }
 
 export interface VerificationStateInput {
+  assessment_id?: string;
   canonical_valid?: boolean;
   onchain_attested?: boolean;
   onchain_data_matches?: boolean | null;

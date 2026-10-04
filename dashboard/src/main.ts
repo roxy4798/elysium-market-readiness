@@ -126,6 +126,19 @@ async function renderDashboard(page: number, revision: number): Promise<void> {
         <div class="heading-meta"><span class="meta-label">DATA SOURCE</span><span class="meta-value"><i class="source-dot" aria-hidden="true"></i> Indexed onchain activity</span></div>
       </section>
       <section class="intro-note"><span class="intro-icon" aria-hidden="true">◈</span><p>Transparent assessments built from observable onchain activity, with deterministic verification and optional onchain attestation.</p></section>
+      <section class="demo-spotlight-card" aria-label="Featured competition demo asset">
+        <div class="spotlight-content">
+          <span class="eyebrow">VERIFIED DEMO ASSET</span>
+          <h2>ELYS · Elysium Test Token</h2>
+          <p>Real Elysium testnet activity indexed · 7 completed days of historical observation · Attested onchain (Block 2492705).</p>
+        </div>
+        <div class="spotlight-stats">
+          <div class="spotlight-metric"><span>Health Score</span><strong>34.00</strong></div>
+          <div class="spotlight-metric"><span>Activity Momentum</span><strong>+4.50</strong></div>
+          <div class="spotlight-metric"><span>Status</span><span class="status-pill status-early">EARLY</span></div>
+          <a class="button button-primary button-small" href="#/tokens/0x245bfe8c6c2429f6a7743d53377ae39b98500459">Explore ELYS Demo →</a>
+        </div>
+      </section>
       <section class="summary-grid" aria-label="Market data summary">
         <article class="summary-card"><span class="summary-label">TOKENS INDEXED</span><strong>${response.total}</strong><span class="summary-foot">Discovered by the Elysium indexer</span></article>
         <article class="summary-card summary-card-wide"><span class="summary-label">ASSESSMENT AVAILABILITY</span><strong class="summary-message">Scores appear after the required historical window is available.</strong><span class="summary-foot">No score is inferred from missing data.</span></article>
@@ -280,15 +293,55 @@ function coverageError(body: unknown): { reason: string; date: string; windowDay
 function detailSuccess(address: string, result: AssessmentDetail, verification: VerificationResponse | null, recorded: RecordedAttestationFields | null): string {
   const components = result.components;
   const rows = [
-    ['Assessment ID', result.assessment_id ? `<span class="mono">${esc(result.assessment_id)}</span><button class="copy-button" type="button" data-copy="${esc(result.assessment_id)}">Copy</button>` : '<span>Not available</span>'],
-    ['Assessment date', esc(result.assessment_date)], ['Schema version', esc(result.schema_version)], ['Methodology version', esc(result.methodology_version)],
-    ['Health score', esc(scoreText(result.health_score, result.status))], ['Activity Momentum', esc(valueText(result.momentum))], ['Status', statusPill(result.status)], ['Assessment hash', result.assessment_hash ? `<span class="mono">${esc(result.assessment_hash)}</span><button class="copy-button" type="button" data-copy="${esc(result.assessment_hash)}">Copy</button>` : '<span>Not available</span>'],
+    ['Token address', `<span class="mono">${esc(address)}</span> <button class="copy-button" type="button" data-copy="${esc(address)}" aria-label="Copy token address">Copy</button>`],
+    ['Assessment ID', result.assessment_id ? `<span class="mono">${esc(result.assessment_id)}</span> <button class="copy-button" type="button" data-copy="${esc(result.assessment_id)}" aria-label="Copy assessment ID">Copy</button>` : '<span>Not available</span>'],
+    ['Assessment date', esc(result.assessment_date)],
+    ['Health score', esc(scoreText(result.health_score, result.status))],
+    ['Activity Momentum', esc(valueText(result.momentum))],
+    ['Status', statusPill(result.status)],
+    ['Methodology version', esc(result.methodology_version)],
+    ['Schema version', esc(result.schema_version)],
+    ['Assessment hash', result.assessment_hash ? `<span class="mono">${esc(result.assessment_hash)}</span> <button class="copy-button" type="button" data-copy="${esc(result.assessment_hash)}" aria-label="Copy assessment hash">Copy</button>` : '<span>Not available</span>'],
   ];
-  return `<section class="page-heading compact-heading"><div><p class="eyebrow">CANONICAL ASSESSMENT</p><h1>Assessment detail</h1><p class="heading-subtitle">${esc(result.token.symbol)} · ${esc(result.assessment_date)}</p></div><a class="button button-small" href="${historyHref(address)}">Assessment history</a></section>
+  return `<section class="page-heading compact-heading">
+      <div>
+        <p class="eyebrow">CANONICAL ASSESSMENT</p>
+        <h1>Assessment detail</h1>
+        <p class="heading-subtitle">${esc(result.token.symbol)} · ${esc(result.assessment_date)}</p>
+      </div>
+      <div class="heading-actions">
+        <a class="button button-small" href="#/methodology">Methodology</a>
+        <a class="button button-small" href="${historyHref(address)}">Assessment history</a>
+      </div>
+    </section>
     <section class="trust-stack" aria-label="Assessment, canonical verification, and onchain attestation">
-      <article class="section-card trust-step assessment-step"><div class="section-heading"><div><p class="eyebrow">1 · ASSESSMENT</p><h2>Persisted assessment</h2></div>${statusPill(result.status)}</div><dl class="detail-list detail-list-wide">${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl><div class="trust-components"><p class="eyebrow">COMPONENT SCORES RETURNED BY THE API</p><div class="component-list">${componentCards(components)}</div></div></article>
+      <article class="section-card trust-step assessment-step">
+        <div class="section-heading">
+          <div><p class="eyebrow">1 · ASSESSMENT</p><h2>Persisted assessment</h2></div>
+          ${statusPill(result.status)}
+        </div>
+        <dl class="detail-list detail-list-wide">${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('')}</dl>
+        <div class="trust-components">
+          <p class="eyebrow">COMPONENT SCORES RETURNED BY THE API</p>
+          <div class="component-list">${componentCards(components)}</div>
+          <p class="method-note">Weights are displayed separately from the component values returned by the assessment API. <a href="#/methodology" class="inline-link">Learn how these 5 components are calculated →</a></p>
+        </div>
+      </article>
       ${verificationFlowHtml(verification, recorded)}
-    </section>`;
+      <article class="section-card trust-step provenance-card" aria-labelledby="provenance-detail-title">
+        <div class="section-heading"><div><p class="eyebrow">4 · PROVENANCE</p><h2 id="provenance-detail-title">Data provenance & integrity</h2></div></div>
+        <dl class="detail-list">
+          <div><dt>Data source</dt><dd>Elysium Testnet</dd></div>
+          <div><dt>Chain</dt><dd>99801</dd></div>
+          <div><dt>Assessment</dt><dd>Per-token, per-date</dd></div>
+          <div><dt>Methodology</dt><dd class="mono">health-v1</dd></div>
+          <div><dt>Canonicalization</dt><dd>Deterministic</dd></div>
+          <div><dt>Integrity</dt><dd>SHA-256 assessment hash</dd></div>
+          <div><dt>Onchain proof</dt><dd class="mono">ElysiumAssessmentAttestation</dd></div>
+        </dl>
+      </article>
+    </section>
+    <p class="disclaimer-inline">Independent assessment layer. Not an official Ascend or Elysium ranking, approval, or investment recommendation.</p>`;
 }
 
 async function renderAssessmentDetail(address: string, date: string, revision: number): Promise<void> {
@@ -312,7 +365,10 @@ async function renderAssessmentDetail(address: string, date: string, revision: n
       }
     }
     if (revision !== renderRevision) return;
-    content.innerHTML = detailSuccess(address, assessment, verification, recordedAttestation);
+    const verificationInput = verification && assessment.assessment_id
+      ? { ...verification, assessment_id: assessment.assessment_id }
+      : verification;
+    content.innerHTML = detailSuccess(address, assessment, verificationInput, recordedAttestation);
   } catch (error) {
     if (revision !== renderRevision) return;
     const state = error instanceof ApiError && error.status === 422 ? coverageError(error.body) : null;
