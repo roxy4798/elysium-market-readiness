@@ -5,7 +5,6 @@
   "compatibility_date": "2026-10-04",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "limits": { "cpu_ms": 10 },
   "vars": {
     "ATTESTATION_ENABLED": "false",
     "ATTESTATION_CONTRACT_ADDRESS": "0x149832ec7f9eb3729ec1682b86e026c0af5a9d61",
