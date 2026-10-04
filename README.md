@@ -84,7 +84,7 @@ $$\text{Health Score} = (\text{Holder Health} \times 0.25) + (\text{Transfer Act
 The verification layer allows reviewers and auditors to verify assessments without trusting the database:
 - **Assessment ID**: $\text{keccak256}(\text{schema\_version} : \text{methodology\_version} : \text{token\_address} : \text{assessment\_date})$.
 - **Assessment Hash**: $\text{SHA-256}(\text{canonical\_json\_payload})$.
-- **Independent Recalculation**: The verification endpoint (`GET /v1/assessments/:id/verify`) loads persisted metric inputs, deterministically reconstructs the canonical payload, recalculates the SHA-256 hash, and compares it against stored records.
+- **Independent Recalculation**: The verification endpoint (`GET /v1/assessments/:assessmentId/verify`) loads persisted metric inputs, deterministically reconstructs the canonical payload, recalculates the SHA-256 hash, and compares it against stored records.
 - If any metric, weight, or score is altered by even one bit, the hash immediately diverges (`valid: false`).
 
 ---
@@ -93,6 +93,7 @@ The verification layer allows reviewers and auditors to verify assessments witho
 
 To establish immutable public provenance, the assessment hash is committed to the Elysium Testnet:
 - **Contract Name**: `ElysiumAssessmentAttestation`
+- **Contract Address**: [`0x149832ec7f9eb3729ec1682b86e026c0af5a9d61`](https://elysium.kinetiq.xyz/testnet-explorer/address/0x149832ec7f9eb3729ec1682b86e026c0af5a9d61)
 - **Design**: Non-upgradeable, no proxies, no admin keys, passive onchain registry with zero offchain computation or scoring logic inside EVM bytecode.
 - **Idempotency**: Re-attesting identical data is completely idempotent; conflicting duplicate data reverts with `AssessmentAlreadyAttestedWithDifferentData`.
 - **Public Verification**: Anyone can read `isAttested(assessmentId)` and `getAttestation(assessmentId)` directly from the Elysium Testnet RPC.
@@ -123,6 +124,19 @@ Verification API
 Dashboard
 ```
 
+### Production API Reference
+Base URL: `https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev`
+
+| Method | Endpoint | Description | Access |
+|---|---|---|---|
+| `GET` | `/health` / `/v1/health` | Service health status | Public |
+| `GET` | `/v1/tokens` | Discovered tokens & latest assessment summary | Public |
+| `GET` | `/v1/tokens/:address/overview` | Token details, latest assessment, 7-day metrics, & attestation | Public |
+| `GET` | `/v1/tokens/:address/metrics` | Historical daily metrics series | Public |
+| `GET` | `/v1/tokens/:address/momentum` | Historical activity momentum series | Public |
+| `GET` | `/v1/assessments/:assessmentId/verify` | Cryptographic canonical & onchain verification proof | Public |
+| `POST` | `/v1/assessments/:assessmentId/attest` | Onchain attestation submission | Restricted (CLI only; 403 on public Worker) |
+
 ---
 
 ## 9. Elysium Testnet Deployment
@@ -136,7 +150,10 @@ The system is deployed and verified on **Elysium Testnet**:
 | **RPC Endpoint** | `https://testnet-rpc.elysium.kinetiq.xyz` |
 | **Native Gas Token** | `HYPE` |
 | **Official Explorer** | `https://elysium.kinetiq.xyz/testnet-explorer` |
-| **Attestation Contract** | `0x149832ec7f9eb3729ec1682b86e026c0af5a9d61` |
+| **Official Faucet** | `https://elysium.kinetiq.xyz/testnet-faucet` |
+| **Production API** | `https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev` |
+| **Production Dashboard** | `https://elysium-market-readiness-dashboard.pages.dev` |
+| **Attestation Contract** | [`0x149832ec7f9eb3729ec1682b86e026c0af5a9d61`](https://elysium.kinetiq.xyz/testnet-explorer/address/0x149832ec7f9eb3729ec1682b86e026c0af5a9d61) |
 | **Contract Deployment Tx**| `0xe498ed954d1f8b9d8f9024fbe2c8dd3517d5d376a0a71a176bb60aa955574e12` (Block `2491307`) |
 | **Verified Attester** | `0xfa438c93705aa9AD78f9EDdca0db140F198fE3C9` |
 
@@ -193,7 +210,7 @@ npm run migrate
 npm run doctor
 
 # 3. Run Test Suites
-npm test                  # 174 indexer & canonical verification tests
+npm test                  # 181 indexer & canonical verification tests
 npm run typecheck         # TypeScript check
 npm run build             # Production compilation
 
@@ -203,7 +220,7 @@ npm run serve
 # 5. Start Dashboard (In a separate terminal)
 cd ../dashboard
 npm install
-npm test                  # 10 dashboard verification tests
+npm test                  # 13 dashboard verification tests
 npm run build
 npm run dev               # Serves UI at http://localhost:5173
 ```
@@ -212,10 +229,17 @@ npm run dev               # Serves UI at http://localhost:5173
 
 ## 13. Competition Demo Flow (2–3 Minutes)
 
-Follow this step-by-step path to demonstrate the entire trust chain during a review or presentation:
+> [!TIP]
+> **Live Production Dashboard**: [https://elysium-market-readiness-dashboard.pages.dev](https://elysium-market-readiness-dashboard.pages.dev)
+>
+> **Production API**: [https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev](https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev)
+
+Follow this step-by-step path to demonstrate the entire trust chain during a review or presentation (using the live production dashboard or local development server):
 
 - **STEP 1 — Open Dashboard**:
-  Navigate to `http://localhost:5173`. Notice the clean dark/light UI, clear disclaimers, and the **Verified Demo Asset** banner for **ELYS**.
+  Navigate to the live production dashboard:
+  **Live Demo**: [https://elysium-market-readiness-dashboard.pages.dev](https://elysium-market-readiness-dashboard.pages.dev)
+  *(Or `http://localhost:5173` if running locally)*. Notice the clean dark/light UI, clear disclaimers, the **Get Testnet HYPE** CTA, and the **Verified Demo Asset** banner for **ELYS**.
 
 - **STEP 2 — Select ELYS**:
   Click on **ELYS** (`0x245bfe8c6c2429f6a7743d53377ae39b98500459`) to open its Token Overview.
@@ -246,7 +270,7 @@ Follow this step-by-step path to demonstrate the entire trust chain during a rev
   - Review the verified proof hierarchy:
     - **Network**: Elysium Testnet
     - **Chain ID**: `99801`
-    - **Contract**: `0x149832ec7f9eb3729ec1682b86e026c0af5a9d61` (with copy button)
+    - **Contract**: [`0x149832ec7f9eb3729ec1682b86e026c0af5a9d61`](https://elysium.kinetiq.xyz/testnet-explorer/address/0x149832ec7f9eb3729ec1682b86e026c0af5a9d61) (with copy button)
     - **Transaction**: `0x35ae5707f0fa98b758afa5a486be6ef5a9f71f43efe73437169a7872f2debd79` (with copy button)
     - **Block**: `2492705`
     - **Attester**: `0xfa438c93705aa9AD78f9EDdca0db140F198fE3C9` (with copy button)
