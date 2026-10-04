@@ -12,7 +12,25 @@ const __dirname = dirname(__filename);
 
 async function main() {
   const rpcUrl = process.env.RPC_URL || 'https://testnet-rpc.elysium.kinetiq.xyz';
-  const privateKey = process.env.ATTESTER_PRIVATE_KEY;
+  let privateKey = process.env.ATTESTER_PRIVATE_KEY;
+
+  if (!privateKey) {
+    const envPaths = [join(__dirname, '../.env'), join(__dirname, '../../indexer/.env')];
+    for (const ep of envPaths) {
+      if (existsSync(ep)) {
+        const lines = readFileSync(ep, 'utf8').split('\n');
+        for (const l of lines) {
+          const trimmed = l.trim();
+          if (trimmed.startsWith('ATTESTER_PRIVATE_KEY=')) {
+            privateKey = trimmed.slice('ATTESTER_PRIVATE_KEY='.length).trim();
+            if (privateKey) break;
+          }
+        }
+      }
+      if (privateKey) break;
+    }
+  }
+
   const expectedChainId = 99801;
 
   if (!privateKey) {
