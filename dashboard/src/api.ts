@@ -119,8 +119,10 @@ export class ApiError extends Error {
   }
 }
 
+export const DEFAULT_PRODUCTION_API_BASE = 'https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev';
+
 export function normalizeApiBase(configuredBase: string | undefined): string {
-  const base = configuredBase?.trim() || 'http://localhost:3000';
+  const base = configuredBase?.trim() || DEFAULT_PRODUCTION_API_BASE;
   const parsed = new URL(base);
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error('API_BASE_URL must be a public HTTP(S) base URL without credentials, query, or fragment.');

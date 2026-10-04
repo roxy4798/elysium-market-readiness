@@ -35,7 +35,7 @@ function detailHref(address: string, date: string): string { return `${historyHr
 function setShell(active: 'dashboard' | 'overview' | 'history' | 'methodology', address?: string, title?: string): void {
   breadcrumb.textContent = title ?? (active === 'dashboard' ? 'Market overview' : active === 'overview' ? 'Token overview' : active === 'history' ? 'Assessment history' : 'How it works');
   if (!address) {
-    sideNav.innerHTML = `<a class="nav-link ${active === 'dashboard' ? 'active' : ''}" href="#/"><span class="nav-icon" aria-hidden="true">▦</span>Market overview</a><a class="nav-link ${active === 'methodology' ? 'active' : ''}" href="#/methodology"><span class="nav-icon" aria-hidden="true">◎</span>How it works</a>`;
+    sideNav.innerHTML = `<a class="nav-link ${active === 'dashboard' ? 'active' : ''}" href="#/"><span class="nav-icon" aria-hidden="true">▦</span>Market overview</a><a class="nav-link ${active === 'methodology' ? 'active' : ''}" href="#/methodology"><span class="nav-icon" aria-hidden="true">◎</span>How it works</a><a class="nav-link nav-faucet" href="https://elysium.kinetiq.xyz/testnet-faucet" target="_blank" rel="noopener noreferrer"><span class="nav-icon" aria-hidden="true">↗</span>Get Testnet HYPE</a>`;
     return;
   }
   sideNav.innerHTML = `
@@ -43,7 +43,8 @@ function setShell(active: 'dashboard' | 'overview' | 'history' | 'methodology', 
     <div class="nav-token">${esc(shortAddress(address))}</div>
     <a class="nav-link ${active === 'overview' ? 'active' : ''}" href="${tokenHref(address)}"><span class="nav-icon" aria-hidden="true">◫</span>Overview</a>
     <a class="nav-link ${active === 'history' ? 'active' : ''}" href="${historyHref(address)}"><span class="nav-icon" aria-hidden="true">◷</span>Assessment history</a>
-    <a class="nav-link ${active === 'methodology' ? 'active' : ''}" href="#/methodology"><span class="nav-icon" aria-hidden="true">◎</span>How it works</a>`;
+    <a class="nav-link ${active === 'methodology' ? 'active' : ''}" href="#/methodology"><span class="nav-icon" aria-hidden="true">◎</span>How it works</a>
+    <a class="nav-link nav-faucet" href="https://elysium.kinetiq.xyz/testnet-faucet" target="_blank" rel="noopener noreferrer"><span class="nav-icon" aria-hidden="true">↗</span>Get Testnet HYPE</a>`;
 }
 
 function shellLoading(active: 'dashboard' | 'overview' | 'history', address?: string): void {

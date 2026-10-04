@@ -17,10 +17,12 @@ function setMetaContent(content) {
   };
 }
 
-test('API base defaults to localhost and normalizes configured production URLs', async () => {
+test('API base defaults to production Worker and normalizes configured URLs', async () => {
   setMetaContent(undefined);
-  const { normalizeApiBase } = await import(`../dist/api.js?default=${Date.now()}`);
-  assert.equal(normalizeApiBase(undefined), 'http://localhost:3000');
+  const { normalizeApiBase, DEFAULT_PRODUCTION_API_BASE } = await import(`../dist/api.js?default=${Date.now()}`);
+  assert.equal(normalizeApiBase(undefined), 'https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev');
+  assert.equal(normalizeApiBase(undefined), DEFAULT_PRODUCTION_API_BASE);
+  assert.equal(normalizeApiBase('http://localhost:3000'), 'http://localhost:3000');
   assert.equal(normalizeApiBase('https://api.example.com/'), 'https://api.example.com');
   assert.equal(normalizeApiBase('https://api.example.com/v1///'), 'https://api.example.com/v1');
   assert.throws(() => normalizeApiBase('https://user:password@example.com'), /public HTTP\(S\)/);
@@ -52,10 +54,10 @@ test('production build embeds API_BASE_URL and API requests use the normalized U
   }
 });
 
-test('production build defaults to localhost when API_BASE_URL is unset', async () => {
+test('production build defaults to production Worker when API_BASE_URL is unset', async () => {
   const env = { ...process.env };
   delete env.API_BASE_URL;
   execFileSync(process.execPath, ['build.mjs'], { cwd: dashboardDir, env, stdio: 'pipe' });
   const html = await readFile(distHtml, 'utf8');
-  assert.match(html, /content="http:\/\/localhost:3000"/);
+  assert.match(html, /content="https:\/\/elysium-market-readiness-api\.elysium-market-readiness-indexer\.workers\.dev"/);
 });

@@ -4,7 +4,8 @@ await rm(new URL('./dist/styles.css', import.meta.url), { force: true });
 await mkdir(new URL('./dist', import.meta.url), { recursive: true });
 await cp(new URL('./styles.css', import.meta.url), new URL('./dist/styles.css', import.meta.url));
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
-const configuredBase = process.env['API_BASE_URL']?.trim() || 'http://localhost:3000';
+const DEFAULT_API_BASE = 'https://elysium-market-readiness-api.elysium-market-readiness-indexer.workers.dev';
+const configuredBase = process.env['API_BASE_URL']?.trim() || DEFAULT_API_BASE;
 let apiBase;
 try {
   apiBase = new URL(configuredBase);
