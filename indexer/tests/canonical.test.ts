@@ -382,38 +382,22 @@ describe('Phase 3A — REST API Endpoints (Tests 15–20)', () => {
     expect(body.error).toContain('Invalid date');
   });
 
-  // 17. insufficient-data response
-  it('17. returns HTTP 422 when token has insufficient historical data (< 7 days)', async () => {
+  // 17. public reads never generate insufficient-data assessments on demand
+  it('17. returns deterministic 404 for an unpersisted assessment even with insufficient data', async () => {
     const res = await fetch(`${baseUrl}/v1/tokens/${TOKEN_B}/assessment?date=2026-09-03`);
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(404);
     const body = (await res.json()) as any;
-    expect(body.error).toBe('INSUFFICIENT_DATA');
-    expect(body.reason).toBe('INSUFFICIENT_HISTORICAL_WINDOW');
-    expect(body.data_window_days).toBeLessThan(7);
+    expect(body).toEqual({ error: 'ASSESSMENT_NOT_FOUND', message: 'Assessment not found' });
+    expect(assessmentTable.size).toBe(0);
   });
 
-  // 18. API successful assessment response
-  it('18. returns HTTP 200 with complete canonical assessment schema for valid token', async () => {
+  // 18. an assessment with enough source data is still not computed during a public read
+  it('18. returns deterministic 404 for an unpersisted assessment with sufficient source data', async () => {
     const res = await fetch(`${baseUrl}/v1/tokens/${TOKEN_A}/assessment?date=2026-09-08`);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(404);
     const body = (await res.json()) as any;
-
-    expect(body.assessment_id).toMatch(/^0x[0-9a-f]{64}$/);
-    expect(body.schema_version).toBe('1.0');
-    expect(body.methodology_version).toBe('health-v1');
-    expect(body.token.address).toBe(TOKEN_A.toLowerCase());
-    expect(body.token.symbol).toBe('USDC');
-    expect(body.assessment_date).toBe('2026-09-08');
-    expect(typeof body.health_score).toBe('number');
-    expect(typeof body.momentum).toBe('number');
-    expect(typeof body.status).toBe('string');
-    expect(body.components.holder_health).toBeDefined();
-    expect(body.components.transfer_activity).toBeDefined();
-    expect(body.components.address_activity).toBeDefined();
-    expect(body.components.concentration_score).toBeDefined();
-    expect(body.components.consistency_score).toBeDefined();
-    expect(body.data_window_days).toBe(7);
-    expect(body.assessment_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.error).toBe('ASSESSMENT_NOT_FOUND');
+    expect(assessmentTable.size).toBe(0);
   });
 
   // 19. API 404
@@ -425,22 +409,10 @@ describe('Phase 3A — REST API Endpoints (Tests 15–20)', () => {
     expect(body.error).toContain('not found');
   });
 
-  // 20. API verification response
-  it('20. verifies assessment by ID via GET /v1/assessments/:id/verify returning valid=true', async () => {
-    // First, obtain valid assessment
-    const assessRes = await fetch(`${baseUrl}/v1/tokens/${TOKEN_A}/assessment?date=2026-09-08`);
-    expect(assessRes.status).toBe(200);
-    const assessBody = (await assessRes.json()) as any;
-    const assessmentId = assessBody.assessment_id;
-
-    // Verify it via verification endpoint
-    const verifyRes = await fetch(`${baseUrl}/v1/assessments/${assessmentId}/verify`);
-    expect(verifyRes.status).toBe(200);
-    const verifyBody = (await verifyRes.json()) as any;
-
-    expect(verifyBody.assessment_id).toBe(assessmentId);
-    expect(verifyBody.valid).toBe(true);
-    expect(verifyBody.assessment_hash).toBe(assessBody.assessment_hash);
-    expect(verifyBody.methodology_version).toBe('health-v1');
+  // 20. verification remains read-only and reports absent IDs without generating them
+  it('20. verification endpoint returns 404 for an assessment that has not been persisted', async () => {
+    const verifyRes = await fetch(`${baseUrl}/v1/assessments/${'0x' + 'a'.repeat(64)}/verify`);
+    expect(verifyRes.status).toBe(404);
+    expect(assessmentTable.size).toBe(0);
   });
 });

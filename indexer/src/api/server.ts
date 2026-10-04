@@ -7,11 +7,6 @@ import { isAddress } from 'viem';
 import type { Queryable } from '../database.js';
 import { validateDateString } from '../metrics/daily-metrics.js';
 import {
-  assessToken,
-  loadObservationsForToken,
-  upsertMarketAssessment,
-} from '../assessment/assessment-engine.js';
-import {
   CURRENT_METHODOLOGY_VERSION,
   CURRENT_SCHEMA_VERSION,
 } from '../assessment/canonical.js';
@@ -312,41 +307,8 @@ export async function handleRequest(
         [tokenAddress, assessmentDate],
       );
 
-      // If not yet evaluated, evaluate on-demand and store
       if (storedRes.rows.length === 0) {
-        const obs = await loadObservationsForToken(pool, tokenAddress, assessmentDate);
-        const computed = assessToken(tokenAddress, assessmentDate, obs);
-        await upsertMarketAssessment(pool, computed);
-
-        // Re-read row
-        storedRes = await pool.query(
-          `SELECT
-             token_address,
-             assessment_date::text as assessment_date,
-             health_score,
-             status,
-             momentum,
-             holder_health,
-             transfer_activity,
-             address_activity,
-             concentration_score,
-             consistency_score,
-             data_window_days,
-             reason,
-             assessment_id,
-             schema_version,
-             methodology_version,
-             assessment_hash
-           FROM market_assessments
-           WHERE token_address = LOWER($1)
-             AND assessment_date = $2::date
-           LIMIT 1`,
-          [tokenAddress, assessmentDate],
-        );
-      }
-
-      if (storedRes.rows.length === 0) {
-        sendError(res, 404, `Assessment for ${tokenAddress} on ${assessmentDate} not found`);
+        sendJson(res, 404, { error: 'ASSESSMENT_NOT_FOUND', message: 'Assessment not found' });
         return;
       }
 

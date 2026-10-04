@@ -8,7 +8,7 @@ The dashboard is a TypeScript client for the Phase 4A REST API. It displays pers
 2. From `dashboard`, run `npm install` once, then `npm run dev`.
 3. Open `http://localhost:5173`.
 
-The API base URL is configured by the `elysium-api-base` meta tag in `index.html`. Keep production API configuration deployment-specific; do not put credentials in the frontend.
+The development default is `http://localhost:3000`. Production builds can inject a public API URL with `API_BASE_URL=https://api.example.com npm run build`; the build embeds it in the generated `dist/index.html`. The value is public frontend configuration only, so never put credentials or secrets in it.
 
 ## Quality commands
 
