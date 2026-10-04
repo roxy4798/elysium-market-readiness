@@ -528,26 +528,6 @@ export async function verifyAssessment(
   const assessmentIdBytes32 = assessmentIdToBytes32(row.assessment_id);
 
   try {
-    const isAttested = await publicClient.readContract({
-      address: contractAddress as `0x${string}`,
-      abi: elysiumAssessmentAttestationAbi,
-      functionName: 'isAttested',
-      args: [assessmentIdBytes32],
-    });
-
-    if (!isAttested) {
-      return {
-        assessment_id: row.assessment_id,
-        valid: canonicalCheck.valid,
-        canonical_valid: canonicalCheck.valid,
-        onchain_attested: false,
-        onchain_data_matches: false,
-        assessment_hash: canonicalCheck.computedHash,
-        methodology_version: payload.methodology_version,
-        onchain: { configured: true, attested: false },
-      };
-    }
-
     const onchainRaw = (await publicClient.readContract({
       address: contractAddress as `0x${string}`,
       abi: elysiumAssessmentAttestationAbi,
@@ -561,6 +541,22 @@ export async function verifyAssessment(
       `0x${string}`,
       bigint,
     ];
+
+    const attestedAt = onchainRaw[5];
+    const isAttested = attestedAt > 0n;
+
+    if (!isAttested) {
+      return {
+        assessment_id: row.assessment_id,
+        valid: canonicalCheck.valid,
+        canonical_valid: canonicalCheck.valid,
+        onchain_attested: false,
+        onchain_data_matches: false,
+        assessment_hash: canonicalCheck.computedHash,
+        methodology_version: payload.methodology_version,
+        onchain: { configured: true, attested: false },
+      };
+    }
 
     const onchainData: OnchainAttestationData = {
       assessmentHash: onchainRaw[0],

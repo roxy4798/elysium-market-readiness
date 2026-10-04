@@ -245,6 +245,25 @@ export async function getTokenMomentum(
   };
 }
 
+export async function getAssessmentVerification(
+  pool: Queryable,
+  assessmentId: string,
+): Promise<{ status: number; body: unknown }> {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(assessmentId)) {
+    return { status: 400, body: { error: `Invalid assessment ID format: ${assessmentId}` } };
+  }
+
+  try {
+    return { status: 200, body: await verifyAssessment(pool, assessmentId) };
+  } catch (err: unknown) {
+    if (err instanceof AssessmentNotFoundError) {
+      return { status: 404, body: { error: err.message } };
+    }
+    logger.error('verification failed', { error: err });
+    return { status: 500, body: { error: 'Verification failed' } };
+  }
+}
+
 export interface ServerOptions {
   port?: number;
   host?: string;
@@ -455,27 +474,9 @@ export async function handleRequest(
         return;
       }
 
-      const assessmentId = verifyMatch[1]!;
-
-      // Validate assessmentId format (0x followed by 64 hex characters)
-      if (!/^0x[0-9a-fA-F]{64}$/.test(assessmentId)) {
-        sendError(res, 400, `Invalid assessment ID format: ${assessmentId}`);
-        return;
-      }
-
-      try {
-        const verification = await verifyAssessment(pool, assessmentId);
-        sendJson(res, 200, verification);
-        return;
-      } catch (err: unknown) {
-        if (err instanceof AssessmentNotFoundError) {
-          sendError(res, 404, err.message);
-          return;
-        }
-        logger.error('verification failed', { error: err });
-        sendError(res, 500, 'Verification failed');
-        return;
-      }
+      const result = await getAssessmentVerification(pool, verifyMatch[1]!);
+      sendJson(res, result.status, result.body);
+      return;
     }
 
     sendError(res, 404, 'Endpoint not found');

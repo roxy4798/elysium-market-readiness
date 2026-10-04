@@ -338,12 +338,65 @@ test('Worker bridge preserves API routes, CORS, read-only behavior, and verifica
   assert.equal(missingAssessment.status, 404);
   assert.equal((await missingAssessment.json()).error, 'ASSESSMENT_NOT_FOUND');
 
-  const verification = (await expectJson(`/v1/assessments/${assessmentId}/verify`)).body;
-  assert.deepEqual({ canonical_valid: verification.canonical_valid, onchain_attested: verification.onchain_attested, onchain_data_matches: verification.onchain_data_matches }, {
+  const verificationResponse = await expectJson(`/v1/assessments/${assessmentId}/verify`);
+  const verification = verificationResponse.body;
+  assert.equal(verificationResponse.response.headers.get('content-type'), 'application/json; charset=utf-8');
+  assert.equal(verificationResponse.response.headers.get('access-control-allow-origin'), '*');
+  assert.equal(verificationResponse.response.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS');
+  assert.equal(verificationResponse.response.headers.get('access-control-allow-headers'), 'Content-Type');
+  assert.deepEqual({
+    assessment_id: verification.assessment_id,
+    assessment_hash: verification.assessment_hash,
+    methodology_version: verification.methodology_version,
+    canonical_valid: verification.canonical_valid,
+    onchain_attested: verification.onchain_attested,
+    onchain_data_matches: verification.onchain_data_matches,
+  }, {
+    assessment_id: assessmentId,
+    assessment_hash: '180f144a819cdcd22d9244feef524dc7f75a80f73505410b9e2efba78d05193c',
+    methodology_version: 'health-v1',
     canonical_valid: true,
     onchain_attested: true,
     onchain_data_matches: true,
   });
+  assert.deepEqual(verification.onchain, {
+    configured: true,
+    hash_matches: true,
+    token_matches: true,
+    date_matches: true,
+    methodology_matches: true,
+    contract_address: '0x149832ec7f9eb3729ec1682b86e026c0af5a9d61',
+    chain_id: 99801,
+    attester: '0xfa438c93705aa9AD78f9EDdca0db140F198fE3C9',
+    attested_at: verification.onchain.attested_at,
+  });
+
+  const badDateVerification = await expectJson(`/v1/assessments/${assessmentId}/verify?date=bad`);
+  assert.deepEqual(badDateVerification.body, verification);
+  const trailingSlashVerification = await expectJson(`/v1/assessments/${assessmentId}/verify/`);
+  assert.deepEqual(trailingSlashVerification.body, verification);
+  const invalidVerificationId = await expectJson('/v1/assessments/not-an-id/verify', 400);
+  assert.deepEqual(invalidVerificationId.body, { error: 'Invalid assessment ID format: not-an-id' });
+  assert.equal(invalidVerificationId.response.headers.get('access-control-allow-origin'), '*');
+  const uppercaseVerificationId = await expectJson(`/v1/assessments/${assessmentId.toUpperCase()}/verify`, 400);
+  assert.deepEqual(uppercaseVerificationId.body, { error: `Invalid assessment ID format: ${assessmentId.toUpperCase()}` });
+  const missingVerification = await expectJson(`/v1/assessments/0x${'1'.repeat(64)}/verify`, 404);
+  assert.deepEqual(missingVerification.body, { error: `Assessment with ID "0x${'1'.repeat(64)}" not found` });
+  const malformedVerificationPath = await expectJson('/v1/assessments/verify', 404);
+  assert.deepEqual(malformedVerificationPath.body, { error: 'Endpoint not found' });
+  const verificationOptions = await request(`/v1/assessments/${assessmentId}/verify`, { method: 'OPTIONS' });
+  assert.equal(verificationOptions.status, 204);
+  assert.equal(await verificationOptions.text(), '');
+  assert.equal(verificationOptions.headers.get('access-control-allow-origin'), '*');
+  assert.equal(verificationOptions.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS');
+  assert.equal(verificationOptions.headers.get('access-control-allow-headers'), 'Content-Type');
+  const verificationPost = await expectJson(`/v1/assessments/${assessmentId}/verify`, 405, { method: 'POST' });
+  assert.deepEqual(verificationPost.body, { error: 'Method Not Allowed' });
+  const verificationHead = await request(`/v1/assessments/${assessmentId}/verify`, { method: 'HEAD' });
+  assert.equal(verificationHead.status, 405);
+  assert.equal(await verificationHead.text(), '');
+  assert.equal(verificationHead.headers.get('content-type'), 'application/json; charset=utf-8');
+  assert.equal(verificationHead.headers.get('access-control-allow-origin'), '*');
 
   const options = await request(`/v1/assessments/${assessmentId}/attest`, { method: 'OPTIONS' });
   assert.equal(options.status, 204);

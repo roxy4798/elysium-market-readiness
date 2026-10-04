@@ -695,4 +695,92 @@ describe('Phase 3B — Verification Tests: Offchain & Onchain (Cases 17–20)', 
     expect(result.valid).toBe(false);
     expect(result.onchain?.methodology_matches).toBe(false);
   });
+
+  // Phase 6C-FREE.8C: single RPC call and unattested handling
+  it('Phase 6C-FREE.8C: uses single getAttestation call (no isAttested) and correctly marks attested', async () => {
+    const calls: string[] = [];
+    const mockClient = {
+      readContract: (async ({ functionName }: any) => {
+        calls.push(functionName);
+        if (functionName === 'getAttestation') {
+          return [
+            `0x${validHash}`,
+            TEST_TOKEN as `0x${string}`,
+            dateToUtcMidnightTimestamp(TEST_DATE),
+            methodologyToBytes32(TEST_METHODOLOGY),
+            DUMMY_ATTESTER_ADDRESS as `0x${string}`,
+            1790035500n,
+          ];
+        }
+        throw new Error(`Unexpected contract function call: ${functionName}`);
+      }) as any,
+    } as unknown as PublicClient;
+
+    const result = await verifyAssessment(mockDb, validId, {
+      contractAddress: DUMMY_CONTRACT_ADDRESS,
+      publicClient: mockClient,
+    });
+
+    expect(calls).toEqual(['getAttestation']);
+    expect(calls).not.toContain('isAttested');
+    expect(result.canonical_valid).toBe(true);
+    expect(result.onchain_attested).toBe(true);
+    expect(result.onchain_data_matches).toBe(true);
+    expect(result.valid).toBe(true);
+  });
+
+  it('Phase 6C-FREE.8C: unattested assessment returns onchain_attested=false when attestedAt=0', async () => {
+    const calls: string[] = [];
+    const mockClient = {
+      readContract: (async ({ functionName }: any) => {
+        calls.push(functionName);
+        if (functionName === 'getAttestation') {
+          return [
+            '0x0000000000000000000000000000000000000000000000000000000000000000',
+            '0x0000000000000000000000000000000000000000',
+            0n,
+            '0x0000000000000000000000000000000000000000000000000000000000000000',
+            '0x0000000000000000000000000000000000000000',
+            0n,
+          ];
+        }
+        throw new Error(`Unexpected contract function call: ${functionName}`);
+      }) as any,
+    } as unknown as PublicClient;
+
+    const result = await verifyAssessment(mockDb, validId, {
+      contractAddress: DUMMY_CONTRACT_ADDRESS,
+      publicClient: mockClient,
+    });
+
+    expect(calls).toEqual(['getAttestation']);
+    expect(calls).not.toContain('isAttested');
+    expect(result.canonical_valid).toBe(true);
+    expect(result.onchain_attested).toBe(false);
+    expect(result.onchain_data_matches).toBe(false);
+    expect(result.valid).toBe(true);
+    expect(result.onchain).toEqual({ configured: true, attested: false });
+  });
+
+  it('Phase 6C-FREE.8C: falls back cleanly when getAttestation throws', async () => {
+    const calls: string[] = [];
+    const mockClient = {
+      readContract: (async ({ functionName }: any) => {
+        calls.push(functionName);
+        throw new Error('RPC network connection timeout');
+      }) as any,
+    } as unknown as PublicClient;
+
+    const result = await verifyAssessment(mockDb, validId, {
+      contractAddress: DUMMY_CONTRACT_ADDRESS,
+      publicClient: mockClient,
+    });
+
+    expect(calls).toEqual(['getAttestation']);
+    expect(result.canonical_valid).toBe(true);
+    expect(result.onchain_attested).toBe(false);
+    expect(result.onchain_data_matches).toBe(false);
+    expect(result.valid).toBe(true);
+    expect(result.onchain).toEqual({ configured: true, error: 'contract_read_failed' });
+  });
 });
