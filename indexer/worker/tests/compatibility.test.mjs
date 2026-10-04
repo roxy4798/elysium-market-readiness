@@ -112,6 +112,10 @@ test('Worker bridge preserves API routes, CORS, read-only behavior, and verifica
     status: 'EARLY',
   });
 
+  const missingAssessment = await request(`/v1/tokens/${token}/assessment?date=2026-10-04`);
+  assert.equal(missingAssessment.status, 404);
+  assert.equal((await missingAssessment.json()).error, 'ASSESSMENT_NOT_FOUND');
+
   const verification = (await expectJson(`/v1/assessments/${assessmentId}/verify`)).body;
   assert.deepEqual({ canonical_valid: verification.canonical_valid, onchain_attested: verification.onchain_attested, onchain_data_matches: verification.onchain_data_matches }, {
     canonical_valid: true,

@@ -3,6 +3,7 @@
   "name": "elysium-market-readiness-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-04",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "limits": { "cpu_ms": 10 },
   "vars": {
@@ -14,7 +15,7 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "00000000-0000-0000-0000-000000000001"
+      "id": "f980ddd3b40b4b0592b02e8c6b846286"
     }
   ]
 }
