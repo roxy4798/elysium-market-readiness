@@ -47,6 +47,8 @@ const TEST_SCHEMA = '1.0';
 const DUMMY_CONTRACT_ADDRESS = '0x1234567890123456789012345678901234567890';
 const DUMMY_PRIVATE_KEY = '0x4c0883a69102937d6231471b5dbb6204db7e716b78ac5c78273082fe39cfbe85';
 const DUMMY_ATTESTER_ADDRESS = '0xa8037A207be9e525798Fad10037aF982367d3419';
+const TEST_ATTESTATION_SECRET = 'test-attestation-secret-0123456789abcdef';
+const AUTH_POST = { method: 'POST', headers: { Authorization: `Bearer ${TEST_ATTESTATION_SECRET}` } };
 
 function samplePayload(overrides: Partial<CanonicalAssessmentPayload> = {}): CanonicalAssessmentPayload {
   return {
@@ -391,6 +393,8 @@ describe('Phase 3B — Backend Attestation Service & REST API (Cases 1–3, 14�
     // Configure env vars for API
     process.env['ATTESTATION_CONTRACT_ADDRESS'] = DUMMY_CONTRACT_ADDRESS;
     process.env['ATTESTER_PRIVATE_KEY'] = DUMMY_PRIVATE_KEY;
+    process.env['ATTESTATION_ENABLED'] = 'true';
+    process.env['ATTESTATION_API_SECRET'] = TEST_ATTESTATION_SECRET;
 
     server = createApiServer(mockDb);
     await new Promise<void>((resolve) => {
@@ -407,6 +411,8 @@ describe('Phase 3B — Backend Attestation Service & REST API (Cases 1–3, 14�
   afterAll(async () => {
     delete process.env['ATTESTATION_CONTRACT_ADDRESS'];
     delete process.env['ATTESTER_PRIVATE_KEY'];
+    delete process.env['ATTESTATION_ENABLED'];
+    delete process.env['ATTESTATION_API_SECRET'];
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
@@ -464,17 +470,17 @@ describe('Phase 3B — Backend Attestation Service & REST API (Cases 1–3, 14�
   it('14. refuses invalid, missing, or insufficient canonical assessment', async () => {
     // 404 for unknown assessment
     const nonExistent = '0x0000000000000000000000000000000000000000000000000000000000000001';
-    const res404 = await fetch(`${baseUrl}/v1/assessments/${nonExistent}/attest`, { method: 'POST' });
+    const res404 = await fetch(`${baseUrl}/v1/assessments/${nonExistent}/attest`, AUTH_POST);
     expect(res404.status).toBe(404);
 
     // 422 for insufficient data
     const insufficientId = computeAssessmentId(TEST_SCHEMA, TEST_METHODOLOGY, TEST_TOKEN, '2026-09-01');
-    const res422 = await fetch(`${baseUrl}/v1/assessments/${insufficientId}/attest`, { method: 'POST' });
+    const res422 = await fetch(`${baseUrl}/v1/assessments/${insufficientId}/attest`, AUTH_POST);
     expect(res422.status).toBe(422);
 
     // 422 for tampered/invalid canonical verification
     const tamperedId = computeAssessmentId(TEST_SCHEMA, TEST_METHODOLOGY, TEST_TOKEN, '2026-09-05');
-    const resTampered = await fetch(`${baseUrl}/v1/assessments/${tamperedId}/attest`, { method: 'POST' });
+    const resTampered = await fetch(`${baseUrl}/v1/assessments/${tamperedId}/attest`, AUTH_POST);
     expect(resTampered.status).toBe(422);
   });
 
@@ -484,7 +490,7 @@ describe('Phase 3B — Backend Attestation Service & REST API (Cases 1–3, 14�
     delete process.env['ATTESTER_PRIVATE_KEY'];
 
     try {
-      const res = await fetch(`${baseUrl}/v1/assessments/${validId}/attest`, { method: 'POST' });
+      const res = await fetch(`${baseUrl}/v1/assessments/${validId}/attest`, AUTH_POST);
       expect(res.status).toBe(503);
       const body = (await res.json()) as any;
       expect(body.error).toContain('ATTESTER_PRIVATE_KEY');
@@ -495,7 +501,7 @@ describe('Phase 3B — Backend Attestation Service & REST API (Cases 1–3, 14�
 
   // Case 16: backend does not expose secrets
   it('16. never exposes private key in responses or logs even on fatal errors', async () => {
-    const res = await fetch(`${baseUrl}/v1/assessments/${validId}/attest`, { method: 'POST' });
+    const res = await fetch(`${baseUrl}/v1/assessments/${validId}/attest`, AUTH_POST);
     const text = await res.text();
 
     expect(text).not.toContain(DUMMY_PRIVATE_KEY);

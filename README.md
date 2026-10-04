@@ -634,12 +634,26 @@ ATTESTATION_CONTRACT_ADDRESS=
 
 # Funded testnet attester private key (REQUIRED for submitting onchain attestations)
 ATTESTER_PRIVATE_KEY=
+
+# Attestation endpoint gate (Phase 5B.0). Disabled unless exactly "true".
+ATTESTATION_ENABLED=false
+
+# Server-side bearer secret for POST /attest (min 32 characters)
+ATTESTATION_API_SECRET=
 ```
 
 #### Security Guardrails:
 - **Never Commit Secrets**: `.env` is explicitly ignored by `.gitignore`.
 - **Zero Secret Exposure**: The private key is never logged to stdout/stderr, never returned in API responses, and never exposed in error traces.
 - **Fail-Safe Missing Configuration**: If attestation is attempted without `ATTESTER_PRIVATE_KEY` or `ATTESTATION_CONTRACT_ADDRESS`, the system returns a sanitized HTTP 503 error (`AttestationConfigError`) rather than crashing or leaking credentials.
+- **Endpoint Gate**: `POST /v1/assessments/:id/attest` is checked before any database lookup or signer access:
+  | Condition | Response |
+  | :--- | :--- |
+  | `ATTESTATION_ENABLED` not `true` (default) | `403 ATTESTATION_DISABLED` |
+  | Enabled, secret unset or < 32 chars | `503 ATTESTATION_AUTH_NOT_CONFIGURED` |
+  | Missing `Authorization: Bearer` header | `401 ATTESTATION_AUTH_REQUIRED` |
+  | Wrong secret (constant-time compare) | `403 ATTESTATION_AUTH_INVALID` |
+- **Server-Side Only**: The bearer secret is for operators/back-office callers. CORS does not allow the `Authorization` header, and the dashboard never holds the secret. `GET /verify` remains public and unauthenticated.
 
 ### 8. Manual Attestation Usage
 
@@ -647,8 +661,11 @@ Phase 3B supports explicit/manual attestation via HTTP API or CLI:
 
 #### Via REST API:
 ```bash
-POST /v1/assessments/0x2cdabbc86a34c27890a226afda3decfe8bc19f88797651a9e57ff8fb62f9077f/attest
+curl -X POST \
+  -H "Authorization: Bearer $ATTESTATION_API_SECRET" \
+  http://localhost:3000/v1/assessments/0x2cdabbc86a34c27890a226afda3decfe8bc19f88797651a9e57ff8fb62f9077f/attest
 ```
+Requires `ATTESTATION_ENABLED=true` and a matching `ATTESTATION_API_SECRET` on the server.
 The API returns transaction and block metadata only after a real transaction receipt is received. If an assessment is already present in the contract but its original transaction receipt is not recorded locally, the API returns an explicit service error instead of inventing a hash or block number.
 
 #### Via CLI:

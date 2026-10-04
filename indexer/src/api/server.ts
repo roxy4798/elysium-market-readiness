@@ -25,6 +25,7 @@ import {
 } from '../attestation/attestation-service.js';
 import { logger } from '../logger.js';
 import { ELYSIUM_TESTNET_CHAIN_ID } from '../config.js';
+import { authorizeAttestationRequest } from './attestation-auth.js';
 
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
@@ -399,6 +400,15 @@ export async function handleRequest(
     if (attestMatch) {
       if (req.method !== 'POST') {
         sendError(res, 405, 'Method Not Allowed');
+        return;
+      }
+
+      // Security gate: evaluated before any lookup or signer access.
+      const gate = authorizeAttestationRequest(req);
+      if (!gate.ok) {
+        logger.warn('attestation request rejected', { code: gate.code, status: gate.status });
+        if (gate.status === 401) res.setHeader('WWW-Authenticate', 'Bearer');
+        sendJson(res, gate.status, { error: gate.code, message: gate.message });
         return;
       }
 
