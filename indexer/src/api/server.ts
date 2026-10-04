@@ -71,6 +71,116 @@ function canonicalAssessment(row: Record<string, unknown>) {
   };
 }
 
+export async function listTokens(
+  pool: Queryable,
+  parsedUrl: URL,
+): Promise<{ status: number; body: unknown }> {
+  const page = pagination(parsedUrl);
+  if (!page) return { status: 400, body: { error: 'Invalid page or limit' } };
+
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT t.address, t.symbol, t.name, t.decimals, t.total_supply::text AS total_supply,
+            a.assessment_date::text AS latest_assessment_date, a.health_score, a.momentum, a.status
+     FROM tokens t
+     LEFT JOIN LATERAL (
+       SELECT assessment_date, health_score, momentum, status FROM market_assessments
+       WHERE token_address = t.address ORDER BY assessment_date DESC LIMIT 1
+     ) a ON TRUE
+     ORDER BY t.address ASC LIMIT $1 OFFSET $2`, [page.limit, page.offset]);
+  const count = await pool.query<{ total: string }>('SELECT COUNT(*)::text AS total FROM tokens');
+  return {
+    status: 200,
+    body: { tokens: result.rows.map((r) => ({
+      address: r.address, symbol: r.symbol, name: r.name, decimals: r.decimals,
+      total_supply: r.total_supply, latest_assessment_date: r.latest_assessment_date,
+      health_score: r.health_score === null ? null : Number(r.health_score),
+      momentum: r.momentum === null ? null : Number(r.momentum), status: r.status,
+    })), page: page.page, limit: page.limit, total: Number(count.rows[0]?.total ?? 0) },
+  };
+}
+
+export async function getAssessment(
+  pool: Queryable,
+  rawAddress: string,
+  parsedUrl: URL,
+): Promise<{ status: number; body: unknown }> {
+  if (!isAddress(rawAddress)) {
+    return { status: 400, body: { error: `Invalid Ethereum address format: ${rawAddress}` } };
+  }
+  const tokenAddress = rawAddress.toLowerCase();
+  const dateParam = parsedUrl.searchParams.get('date');
+  if (!dateParam) {
+    return { status: 400, body: { error: 'Missing required query parameter "date" (format: YYYY-MM-DD)' } };
+  }
+  const dateValidation = validateDateString(dateParam);
+  if (!dateValidation.valid) {
+    return { status: 400, body: { error: dateValidation.error ?? 'Invalid date format. Expected YYYY-MM-DD.' } };
+  }
+  const assessmentDate = dateValidation.normalized;
+  const tokenRes = await pool.query<{ address: string; name: string | null; symbol: string | null }>(
+    'SELECT address, name, symbol FROM tokens WHERE address = LOWER($1) LIMIT 1', [tokenAddress]);
+  if (tokenRes.rows.length === 0) {
+    return { status: 404, body: { error: `Token ${tokenAddress} not found` } };
+  }
+  const token = tokenRes.rows[0]!;
+  const storedRes = await pool.query<{
+    token_address: string;
+    assessment_date: Date | string;
+    health_score: string | null;
+    status: string;
+    momentum: string | null;
+    holder_health: string | null;
+    transfer_activity: string | null;
+    address_activity: string | null;
+    concentration_score: string | null;
+    consistency_score: string | null;
+    data_window_days: number;
+    reason: string | null;
+    assessment_id: string | null;
+    schema_version: string | null;
+    methodology_version: string | null;
+    assessment_hash: string | null;
+  }>(
+    `SELECT token_address, assessment_date::text as assessment_date, health_score, status, momentum,
+            holder_health, transfer_activity, address_activity, concentration_score, consistency_score,
+            data_window_days, reason, assessment_id, schema_version, methodology_version, assessment_hash
+     FROM market_assessments
+     WHERE token_address = LOWER($1) AND assessment_date = $2::date
+     LIMIT 1`, [tokenAddress, assessmentDate]);
+  if (storedRes.rows.length === 0) {
+    return { status: 404, body: { error: 'ASSESSMENT_NOT_FOUND', message: 'Assessment not found' } };
+  }
+  const row = storedRes.rows[0]!;
+  if (row.status === 'INSUFFICIENT_DATA') {
+    return { status: 422, body: {
+      error: 'INSUFFICIENT_DATA',
+      reason: row.reason ?? 'INSUFFICIENT_HISTORICAL_WINDOW',
+      data_window_days: Number(row.data_window_days),
+      token: { address: token.address, symbol: token.symbol ?? token.name ?? token.address },
+      assessment_date: assessmentDate,
+    } };
+  }
+  return { status: 200, body: {
+    assessment_id: row.assessment_id,
+    schema_version: row.schema_version ?? CURRENT_SCHEMA_VERSION,
+    methodology_version: row.methodology_version ?? CURRENT_METHODOLOGY_VERSION,
+    token: { address: token.address, symbol: token.symbol ?? token.name ?? token.address },
+    assessment_date: assessmentDate,
+    health_score: Number(row.health_score),
+    momentum: Number(row.momentum),
+    status: row.status,
+    components: {
+      holder_health: Number(row.holder_health),
+      transfer_activity: Number(row.transfer_activity),
+      address_activity: Number(row.address_activity),
+      concentration_score: Number(row.concentration_score),
+      consistency_score: Number(row.consistency_score),
+    },
+    data_window_days: Number(row.data_window_days),
+    assessment_hash: row.assessment_hash,
+  } };
+}
+
 export interface ServerOptions {
   port?: number;
   host?: string;
@@ -127,24 +237,8 @@ export async function handleRequest(
 
     // Dashboard token discovery: one query obtains each token and its latest persisted assessment.
     if (pathname === '/v1/tokens' && req.method === 'GET') {
-      const page = pagination(parsedUrl);
-      if (!page) { sendError(res, 400, 'Invalid page or limit'); return; }
-      const result = await pool.query<Record<string, unknown>>(
-        `SELECT t.address, t.symbol, t.name, t.decimals, t.total_supply::text AS total_supply,
-                a.assessment_date::text AS latest_assessment_date, a.health_score, a.momentum, a.status
-         FROM tokens t
-         LEFT JOIN LATERAL (
-           SELECT assessment_date, health_score, momentum, status FROM market_assessments
-           WHERE token_address = t.address ORDER BY assessment_date DESC LIMIT 1
-         ) a ON TRUE
-         ORDER BY t.address ASC LIMIT $1 OFFSET $2`, [page.limit, page.offset]);
-      const count = await pool.query<{ total: string }>('SELECT COUNT(*)::text AS total FROM tokens');
-      sendJson(res, 200, { tokens: result.rows.map((r) => ({
-        address: r.address, symbol: r.symbol, name: r.name, decimals: r.decimals,
-        total_supply: r.total_supply, latest_assessment_date: r.latest_assessment_date,
-        health_score: r.health_score === null ? null : Number(r.health_score),
-        momentum: r.momentum === null ? null : Number(r.momentum), status: r.status,
-      })), page: page.page, limit: page.limit, total: Number(count.rows[0]?.total ?? 0) });
+      const result = await listTokens(pool, parsedUrl);
+      sendJson(res, result.status, result.body);
       return;
     }
 
@@ -233,128 +327,8 @@ export async function handleRequest(
     // Route: GET /v1/tokens/:address/assessment?date=YYYY-MM-DD
     const tokenMatch = /^\/v1\/tokens\/([^/]+)\/assessment\/?$/.exec(pathname);
     if (tokenMatch) {
-      const rawAddress = tokenMatch[1]!;
-      if (!isAddress(rawAddress)) {
-        sendError(res, 400, `Invalid Ethereum address format: ${rawAddress}`);
-        return;
-      }
-      const tokenAddress = rawAddress.toLowerCase();
-
-      const dateParam = parsedUrl.searchParams.get('date');
-      if (!dateParam) {
-        sendError(res, 400, 'Missing required query parameter "date" (format: YYYY-MM-DD)');
-        return;
-      }
-
-      const dateValidation = validateDateString(dateParam);
-      if (!dateValidation.valid) {
-        sendError(res, 400, dateValidation.error ?? 'Invalid date format. Expected YYYY-MM-DD.');
-        return;
-      }
-      const assessmentDate = dateValidation.normalized;
-
-      // 1. Verify token exists
-      const tokenRes = await pool.query<{ address: string; name: string | null; symbol: string | null }>(
-        'SELECT address, name, symbol FROM tokens WHERE address = LOWER($1) LIMIT 1',
-        [tokenAddress],
-      );
-      if (tokenRes.rows.length === 0) {
-        sendError(res, 404, `Token ${tokenAddress} not found`);
-        return;
-      }
-      const token = tokenRes.rows[0]!;
-
-      // 2. Query market_assessments
-      let storedRes = await pool.query<{
-        token_address: string;
-        assessment_date: Date | string;
-        health_score: string | null;
-        status: string;
-        momentum: string | null;
-        holder_health: string | null;
-        transfer_activity: string | null;
-        address_activity: string | null;
-        concentration_score: string | null;
-        consistency_score: string | null;
-        data_window_days: number;
-        reason: string | null;
-        assessment_id: string | null;
-        schema_version: string | null;
-        methodology_version: string | null;
-        assessment_hash: string | null;
-      }>(
-        `SELECT
-           token_address,
-           assessment_date::text as assessment_date,
-           health_score,
-           status,
-           momentum,
-           holder_health,
-           transfer_activity,
-           address_activity,
-           concentration_score,
-           consistency_score,
-           data_window_days,
-           reason,
-           assessment_id,
-           schema_version,
-           methodology_version,
-           assessment_hash
-         FROM market_assessments
-         WHERE token_address = LOWER($1)
-           AND assessment_date = $2::date
-         LIMIT 1`,
-        [tokenAddress, assessmentDate],
-      );
-
-      if (storedRes.rows.length === 0) {
-        sendJson(res, 404, { error: 'ASSESSMENT_NOT_FOUND', message: 'Assessment not found' });
-        return;
-      }
-
-      const row = storedRes.rows[0]!;
-
-      // If insufficient data, return 422 Unprocessable Entity
-      if (row.status === 'INSUFFICIENT_DATA') {
-        sendJson(res, 422, {
-          error: 'INSUFFICIENT_DATA',
-          reason: row.reason ?? 'INSUFFICIENT_HISTORICAL_WINDOW',
-          data_window_days: Number(row.data_window_days),
-          token: {
-            address: token.address,
-            symbol: token.symbol ?? token.name ?? token.address,
-          },
-          assessment_date: assessmentDate,
-        });
-        return;
-      }
-
-      // If valid, return 200 with canonical fields and assessment hash
-      const healthScoreNum = Number(row.health_score);
-      const momentumNum = Number(row.momentum);
-
-      sendJson(res, 200, {
-        assessment_id: row.assessment_id,
-        schema_version: row.schema_version ?? CURRENT_SCHEMA_VERSION,
-        methodology_version: row.methodology_version ?? CURRENT_METHODOLOGY_VERSION,
-        token: {
-          address: token.address,
-          symbol: token.symbol ?? token.name ?? token.address,
-        },
-        assessment_date: assessmentDate,
-        health_score: healthScoreNum,
-        momentum: momentumNum,
-        status: row.status,
-        components: {
-          holder_health: Number(row.holder_health),
-          transfer_activity: Number(row.transfer_activity),
-          address_activity: Number(row.address_activity),
-          concentration_score: Number(row.concentration_score),
-          consistency_score: Number(row.consistency_score),
-        },
-        data_window_days: Number(row.data_window_days),
-        assessment_hash: row.assessment_hash,
-      });
+      const result = await getAssessment(pool, tokenMatch[1]!, parsedUrl);
+      sendJson(res, result.status, result.body);
       return;
     }
 

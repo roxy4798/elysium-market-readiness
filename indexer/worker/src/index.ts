@@ -1,6 +1,6 @@
 import { httpServerHandler } from 'cloudflare:node';
 import pg from 'pg';
-import { createApiServer } from '../../src/api/server.js';
+import { createApiServer, getAssessment, listTokens } from '../../src/api/server.js';
 import type { Queryable } from '../../src/database.js';
 
 interface WorkerEnv {
@@ -14,7 +14,7 @@ type HttpHandler = ReturnType<typeof httpServerHandler>;
 type WorkerRequest = Parameters<NonNullable<HttpHandler['fetch']>>[0];
 type WorkerContext = Parameters<NonNullable<HttpHandler['fetch']>>[2];
 
-function createRequestHandler(connectionString: string) {
+function createReadOnlyDatabase(connectionString: string) {
   const pool = new pg.Pool({
     connectionString,
     max: 5,
@@ -31,6 +31,11 @@ function createRequestHandler(connectionString: string) {
     },
   };
 
+  return { pool, database };
+}
+
+function createRequestHandler(connectionString: string) {
+  const { pool, database } = createReadOnlyDatabase(connectionString);
   const server = createApiServer(database);
   nextRouteKey = nextRouteKey >= 32000 ? INTERNAL_ROUTE_KEY : nextRouteKey + 1;
   server.listen(nextRouteKey);
@@ -39,6 +44,84 @@ function createRequestHandler(connectionString: string) {
 
 export default {
   async fetch(request: WorkerRequest, env: WorkerEnv, ctx: WorkerContext): Promise<Response> {
+    const requestUrl = request.method === 'GET' ? new URL(request.url) : null;
+    if (requestUrl?.pathname === '/health') {
+      return new Response('{"status":"ok"}', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        },
+      });
+    }
+
+    if (requestUrl?.pathname === '/v1/tokens') {
+      process.env['ATTESTATION_ENABLED'] = 'false';
+      delete process.env['ATTESTATION_API_SECRET'];
+      delete process.env['ATTESTER_PRIVATE_KEY'];
+
+      const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
+      try {
+        const result = await listTokens(database, requestUrl);
+        return new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } catch {
+        return new Response('{"error":"Internal Server Error"}', {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } finally {
+        await pool.end();
+      }
+    }
+
+    const assessmentMatch = requestUrl && /^\/v1\/tokens\/([^/]+)\/assessment\/?$/.exec(requestUrl.pathname);
+    if (requestUrl && assessmentMatch) {
+      process.env['ATTESTATION_ENABLED'] = 'false';
+      delete process.env['ATTESTATION_API_SECRET'];
+      delete process.env['ATTESTER_PRIVATE_KEY'];
+
+      const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
+      try {
+        const result = await getAssessment(database, assessmentMatch[1]!, requestUrl);
+        return new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } catch {
+        return new Response('{"error":"Internal Server Error"}', {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } finally {
+        await pool.end();
+      }
+    }
+
     // The adapter is deliberately read-only even if deployment variables are
     // changed later. The original route remains reachable and returns the same
     // disabled response, before any DB lookup or signer code can run.
