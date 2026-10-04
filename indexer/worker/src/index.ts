@@ -1,6 +1,6 @@
 import { httpServerHandler } from 'cloudflare:node';
 import pg from 'pg';
-import { createApiServer, getAssessment, listTokens } from '../../src/api/server.js';
+import { createApiServer, getAssessment, getTokenMetrics, getTokenMomentum, listTokens } from '../../src/api/server.js';
 import type { Queryable } from '../../src/database.js';
 
 interface WorkerEnv {
@@ -98,6 +98,72 @@ export default {
       const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
       try {
         const result = await getAssessment(database, assessmentMatch[1]!, requestUrl);
+        return new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } catch {
+        return new Response('{"error":"Internal Server Error"}', {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } finally {
+        await pool.end();
+      }
+    }
+
+    const metricsMatch = requestUrl && /^\/v1\/tokens\/([^/]+)\/metrics\/?$/.exec(requestUrl.pathname);
+    if (requestUrl && metricsMatch) {
+      process.env['ATTESTATION_ENABLED'] = 'false';
+      delete process.env['ATTESTATION_API_SECRET'];
+      delete process.env['ATTESTER_PRIVATE_KEY'];
+
+      const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
+      try {
+        const result = await getTokenMetrics(database, metricsMatch[1]!, requestUrl);
+        return new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } catch {
+        return new Response('{"error":"Internal Server Error"}', {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } finally {
+        await pool.end();
+      }
+    }
+
+    const momentumMatch = requestUrl && /^\/v1\/tokens\/([^/]+)\/momentum\/?$/.exec(requestUrl.pathname);
+    if (requestUrl && momentumMatch) {
+      process.env['ATTESTATION_ENABLED'] = 'false';
+      delete process.env['ATTESTATION_API_SECRET'];
+      delete process.env['ATTESTER_PRIVATE_KEY'];
+
+      const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
+      try {
+        const result = await getTokenMomentum(database, momentumMatch[1]!, requestUrl);
         return new Response(JSON.stringify(result.body), {
           status: result.status,
           headers: {

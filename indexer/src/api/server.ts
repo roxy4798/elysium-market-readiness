@@ -181,6 +181,70 @@ export async function getAssessment(
   } };
 }
 
+export async function getTokenMetrics(
+  pool: Queryable,
+  rawAddress: string,
+  parsedUrl: URL,
+): Promise<{ status: number; body: unknown }> {
+  if (!isAddress(rawAddress)) {
+    return { status: 400, body: { error: 'Invalid Ethereum address format' } };
+  }
+  const address = rawAddress.toLowerCase();
+  const tokenResult = await pool.query<Record<string, unknown>>(
+    'SELECT address, name, symbol, decimals, total_supply::text AS total_supply FROM tokens WHERE address = $1 LIMIT 1', [address]);
+  if (!tokenResult.rows.length) return { status: 404, body: { error: 'Token not found' } };
+
+  const page = pagination(parsedUrl);
+  const dates = dateFilters(parsedUrl);
+  if (!page || !dates) return { status: 400, body: { error: 'Invalid page, limit, or date filter' } };
+  const totalResult = await pool.query<{ total: string }>(
+    'SELECT COUNT(*)::text AS total FROM daily_metrics WHERE token_address=$1 AND ($2::date IS NULL OR date >= $2::date) AND ($3::date IS NULL OR date <= $3::date)',
+    [address, dates.from, dates.to]);
+  const rows = await pool.query<Record<string, unknown>>(
+    `SELECT date::text AS date, holder_count, new_holders, active_holders, transfer_count, unique_senders, unique_receivers,
+            top1_concentration, top5_concentration, top10_concentration FROM daily_metrics
+     WHERE token_address=$1 AND ($2::date IS NULL OR date >= $2::date) AND ($3::date IS NULL OR date <= $3::date)
+     ORDER BY date ASC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
+  return {
+    status: 200,
+    body: { metrics: rows.rows, page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) },
+  };
+}
+
+export async function getTokenMomentum(
+  pool: Queryable,
+  rawAddress: string,
+  parsedUrl: URL,
+): Promise<{ status: number; body: unknown }> {
+  if (!isAddress(rawAddress)) {
+    return { status: 400, body: { error: 'Invalid Ethereum address format' } };
+  }
+  const address = rawAddress.toLowerCase();
+  const tokenResult = await pool.query<Record<string, unknown>>(
+    'SELECT address, name, symbol, decimals, total_supply::text AS total_supply FROM tokens WHERE address = $1 LIMIT 1', [address]);
+  if (!tokenResult.rows.length) return { status: 404, body: { error: 'Token not found' } };
+
+  const page = pagination(parsedUrl);
+  const dates = dateFilters(parsedUrl);
+  if (!page || !dates) return { status: 400, body: { error: 'Invalid page, limit, or date filter' } };
+  const totalResult = await pool.query<{ total: string }>(
+    'SELECT COUNT(*)::text AS total FROM market_assessments WHERE token_address=$1 AND ($2::date IS NULL OR assessment_date >= $2::date) AND ($3::date IS NULL OR assessment_date <= $3::date)',
+    [address, dates.from, dates.to]);
+  const rows = await pool.query<{ date: string; value: string | null }>(
+    `SELECT assessment_date::text AS date, momentum::text AS value FROM market_assessments
+     WHERE token_address=$1 AND ($2::date IS NULL OR assessment_date >= $2::date) AND ($3::date IS NULL OR assessment_date <= $3::date)
+     ORDER BY assessment_date ASC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
+  return {
+    status: 200,
+    body: {
+      momentum: rows.rows.map((row) => ({ date: row.date, value: row.value === null ? null : Number(row.value) })),
+      page: page.page,
+      limit: page.limit,
+      total: Number(totalResult.rows[0]?.total ?? 0),
+    },
+  };
+}
+
 export interface ServerOptions {
   port?: number;
   host?: string;
@@ -245,9 +309,19 @@ export async function handleRequest(
     const dashboardRoute = /^\/v1\/tokens\/([^/]+)\/(overview|assessments|metrics|momentum)\/?$/.exec(pathname);
     if (dashboardRoute && req.method === 'GET') {
       const rawAddress = dashboardRoute[1]!;
+      const route = dashboardRoute[2]!;
+      if (route === 'metrics') {
+        const result = await getTokenMetrics(pool, rawAddress, parsedUrl);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+      if (route === 'momentum') {
+        const result = await getTokenMomentum(pool, rawAddress, parsedUrl);
+        sendJson(res, result.status, result.body);
+        return;
+      }
       if (!isAddress(rawAddress)) { sendError(res, 400, 'Invalid Ethereum address format'); return; }
       const address = rawAddress.toLowerCase();
-      const route = dashboardRoute[2]!;
       const tokenResult = await pool.query<Record<string, unknown>>(
         'SELECT address, name, symbol, decimals, total_supply::text AS total_supply FROM tokens WHERE address = $1 LIMIT 1', [address]);
       if (!tokenResult.rows.length) { sendError(res, 404, 'Token not found'); return; }
@@ -307,19 +381,6 @@ export async function handleRequest(
            WHERE a.token_address=$1 AND ($2::date IS NULL OR assessment_date >= $2::date) AND ($3::date IS NULL OR assessment_date <= $3::date)
            ORDER BY a.assessment_date DESC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
         sendJson(res, 200, { assessments: rows.rows.map(canonicalAssessment), page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) });
-      } else if (route === 'momentum') {
-        const rows = await pool.query<{ date: string; value: string | null }>(
-          `SELECT assessment_date::text AS date, momentum::text AS value FROM market_assessments
-           WHERE token_address=$1 AND ($2::date IS NULL OR assessment_date >= $2::date) AND ($3::date IS NULL OR assessment_date <= $3::date)
-           ORDER BY assessment_date ASC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
-        sendJson(res, 200, { momentum: rows.rows.map((r) => ({ date: r.date, value: r.value === null ? null : Number(r.value) })), page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) });
-      } else {
-        const rows = await pool.query<Record<string, unknown>>(
-          `SELECT date::text AS date, holder_count, new_holders, active_holders, transfer_count, unique_senders, unique_receivers,
-                  top1_concentration, top5_concentration, top10_concentration FROM daily_metrics
-           WHERE token_address=$1 AND ($2::date IS NULL OR date >= $2::date) AND ($3::date IS NULL OR date <= $3::date)
-           ORDER BY date ASC LIMIT $4 OFFSET $5`, [address, dates.from, dates.to, page.limit, page.offset]);
-        sendJson(res, 200, { metrics: rows.rows, page: page.page, limit: page.limit, total: Number(totalResult.rows[0]?.total ?? 0) });
       }
       return;
     }
