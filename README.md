@@ -178,7 +178,7 @@ The system is deployed and verified on **Elysium Testnet**:
 
 ### Prerequisites:
 - Node.js `>= 20.12`
-- PostgreSQL 16+ running locally (`postgresql://elysium:elysium@localhost:5432/market_readiness`)
+- PostgreSQL 16+ running locally (``DATABASE_URL=<your-local-postgres-connection-string>``)
 
 ### Setup:
 ```bash
