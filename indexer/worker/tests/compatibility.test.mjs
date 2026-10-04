@@ -112,11 +112,41 @@ test('Worker bridge preserves API routes, CORS, read-only behavior, and verifica
   assert.equal(healthOptions.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS');
   assert.equal(healthOptions.headers.get('access-control-allow-headers'), 'Content-Type');
 
-  const overview = (await expectJson(`/v1/tokens/${token}/overview`)).body;
+  const overviewResponse = await request(`/v1/tokens/${token}/overview`);
+  assert.equal(overviewResponse.status, 200);
+  assert.equal(overviewResponse.headers.get('content-type'), 'application/json; charset=utf-8');
+  assert.equal(overviewResponse.headers.get('access-control-allow-origin'), '*');
+  assert.equal(overviewResponse.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS');
+  assert.equal(overviewResponse.headers.get('access-control-allow-headers'), 'Content-Type');
+  const overview = await overviewResponse.json();
   assert.equal(overview.token.address.toLowerCase(), token);
   assert.equal(overview.latest_assessment.assessment_id, assessmentId);
   assert.equal(overview.attestation.attested, true);
   assert.equal(overview.attestation.data_matches, true);
+
+  const trailingSlashOverview = await expectJson(`/v1/tokens/${token}/overview/`);
+  assert.deepEqual(trailingSlashOverview.body, overview);
+
+  const invalidOverviewAddress = await request('/v1/tokens/not-an-address/overview');
+  assert.equal(invalidOverviewAddress.status, 400);
+  assert.deepEqual(await invalidOverviewAddress.json(), { error: 'Invalid Ethereum address format' });
+  assert.equal(invalidOverviewAddress.headers.get('access-control-allow-origin'), '*');
+
+  const unknownOverviewToken = await request('/v1/tokens/0x0000000000000000000000000000000000000001/overview');
+  assert.equal(unknownOverviewToken.status, 404);
+  assert.deepEqual(await unknownOverviewToken.json(), { error: 'Token not found' });
+  assert.equal(unknownOverviewToken.headers.get('access-control-allow-origin'), '*');
+
+  const overviewOptions = await request(`/v1/tokens/${token}/overview`, { method: 'OPTIONS' });
+  assert.equal(overviewOptions.status, 204);
+  assert.equal(await overviewOptions.text(), '');
+  assert.equal(overviewOptions.headers.get('access-control-allow-origin'), '*');
+  assert.equal(overviewOptions.headers.get('access-control-allow-methods'), 'GET, POST, OPTIONS');
+  assert.equal(overviewOptions.headers.get('access-control-allow-headers'), 'Content-Type');
+
+  const overviewPost = await request(`/v1/tokens/${token}/overview`, { method: 'POST' });
+  assert.equal(overviewPost.status, 404);
+  assert.deepEqual(await overviewPost.json(), { error: 'Endpoint not found' });
 
   const defaultListing = (await expectJson('/v1/tokens')).body;
   assert.equal(defaultListing.page, 1);

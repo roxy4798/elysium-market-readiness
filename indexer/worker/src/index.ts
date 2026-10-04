@@ -1,6 +1,6 @@
 import { httpServerHandler } from 'cloudflare:node';
 import pg from 'pg';
-import { createApiServer, getAssessment, getAssessmentVerification, getTokenMetrics, getTokenMomentum, listTokens } from '../../src/api/server.js';
+import { createApiServer, getAssessment, getAssessmentVerification, getTokenMetrics, getTokenMomentum, getTokenOverview, listTokens } from '../../src/api/server.js';
 import type { Queryable } from '../../src/database.js';
 
 interface WorkerEnv {
@@ -164,6 +164,39 @@ export default {
       const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
       try {
         const result = await getTokenMomentum(database, momentumMatch[1]!, requestUrl);
+        return new Response(JSON.stringify(result.body), {
+          status: result.status,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } catch {
+        return new Response('{"error":"Internal Server Error"}', {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        });
+      } finally {
+        await pool.end();
+      }
+    }
+
+    const overviewMatch = requestUrl && /^\/v1\/tokens\/([^/]+)\/overview\/?$/.exec(requestUrl.pathname);
+    if (requestUrl && overviewMatch) {
+      process.env['ATTESTATION_ENABLED'] = 'false';
+      delete process.env['ATTESTATION_API_SECRET'];
+      delete process.env['ATTESTER_PRIVATE_KEY'];
+
+      const { pool, database } = createReadOnlyDatabase(env.HYPERDRIVE.connectionString);
+      try {
+        const result = await getTokenOverview(database, overviewMatch[1]!);
         return new Response(JSON.stringify(result.body), {
           status: result.status,
           headers: {

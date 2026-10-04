@@ -245,6 +245,93 @@ export async function getTokenMomentum(
   };
 }
 
+export async function getTokenOverview(
+  pool: Queryable,
+  rawAddress: string,
+): Promise<{ status: number; body: unknown }> {
+  if (!isAddress(rawAddress)) {
+    return { status: 400, body: { error: 'Invalid Ethereum address format' } };
+  }
+  const address = rawAddress.toLowerCase();
+  const tokenResult = await pool.query<Record<string, unknown>>(
+    'SELECT address, name, symbol, decimals, total_supply::text AS total_supply FROM tokens WHERE address = $1 LIMIT 1',
+    [address],
+  );
+  if (!tokenResult.rows.length) {
+    return { status: 404, body: { error: 'Token not found' } };
+  }
+  const token = tokenResult.rows[0]!;
+
+  const [assessmentResult, metricResult] = await Promise.all([
+    pool.query<Record<string, unknown>>(
+      `SELECT a.token_address, a.assessment_date::text AS assessment_date, a.health_score, a.momentum, a.status,
+              a.holder_health, a.transfer_activity, a.address_activity, a.concentration_score, a.consistency_score,
+              a.data_window_days, a.assessment_id, a.schema_version, a.methodology_version, a.assessment_hash,
+              t.name, t.symbol
+       FROM market_assessments a JOIN tokens t ON t.address = a.token_address
+       WHERE a.token_address = $1 ORDER BY a.assessment_date DESC LIMIT 1`,
+      [address],
+    ),
+    pool.query<Record<string, unknown>>(
+      `SELECT date::text AS date, holder_count, new_holders, active_holders, transfer_count,
+            unique_senders, unique_receivers, top1_concentration, top5_concentration, top10_concentration
+       FROM daily_metrics WHERE token_address = $1 ORDER BY date DESC LIMIT 1`,
+      [address],
+    ),
+  ]);
+
+  const assessment = assessmentResult.rows[0]
+    ? canonicalAssessment({ ...assessmentResult.rows[0], token_address: address })
+    : null;
+  const configuredContract = process.env['ATTESTATION_CONTRACT_ADDRESS'];
+  const isConfigured = Boolean(configuredContract && isAddress(configuredContract));
+  let attestation: Record<string, unknown> = {
+    configured: isConfigured,
+    attested: false,
+    data_matches: false,
+    contract_address: isConfigured ? configuredContract : null,
+    chain_id: Number(process.env['CHAIN_ID'] ?? ELYSIUM_TESTNET_CHAIN_ID),
+    transaction_hash: null,
+    block_number: null,
+  };
+
+  if (assessmentResult.rows[0]?.assessment_id) {
+    const saved = await pool.query<Record<string, unknown>>(
+      `SELECT contract_address, chain_id, transaction_hash, block_number FROM assessment_attestations WHERE LOWER(assessment_id)=LOWER($1) LIMIT 1`,
+      [assessmentResult.rows[0].assessment_id],
+    );
+    if (saved.rows[0]) {
+      attestation = {
+        ...attestation,
+        attested: true,
+        contract_address: saved.rows[0].contract_address,
+        chain_id: Number(saved.rows[0].chain_id),
+        transaction_hash: saved.rows[0].transaction_hash,
+        block_number: Number(saved.rows[0].block_number),
+      };
+      if (isConfigured) {
+        try {
+          const check = await verifyAssessment(pool, String(assessmentResult.rows[0].assessment_id));
+          attestation.data_matches = check.onchain_attested ? check.onchain_data_matches : null;
+          if (check.onchain_attested && !check.onchain_data_matches) attestation.mismatch = true;
+        } catch {
+          attestation.data_matches = null;
+        }
+      }
+    }
+  }
+
+  return {
+    status: 200,
+    body: {
+      token,
+      latest_assessment: assessment,
+      latest_metrics: metricResult.rows[0] ?? null,
+      attestation,
+    },
+  };
+}
+
 export async function getAssessmentVerification(
   pool: Queryable,
   assessmentId: string,
@@ -339,50 +426,18 @@ export async function handleRequest(
         sendJson(res, result.status, result.body);
         return;
       }
+      if (route === 'overview') {
+        const result = await getTokenOverview(pool, rawAddress);
+        sendJson(res, result.status, result.body);
+        return;
+      }
+
       if (!isAddress(rawAddress)) { sendError(res, 400, 'Invalid Ethereum address format'); return; }
       const address = rawAddress.toLowerCase();
       const tokenResult = await pool.query<Record<string, unknown>>(
         'SELECT address, name, symbol, decimals, total_supply::text AS total_supply FROM tokens WHERE address = $1 LIMIT 1', [address]);
       if (!tokenResult.rows.length) { sendError(res, 404, 'Token not found'); return; }
       const token = tokenResult.rows[0]!;
-
-      if (route === 'overview') {
-        const assessmentResult = await pool.query<Record<string, unknown>>(
-          `SELECT a.token_address, a.assessment_date::text AS assessment_date, a.health_score, a.momentum, a.status,
-                  a.holder_health, a.transfer_activity, a.address_activity, a.concentration_score, a.consistency_score,
-                  a.data_window_days, a.assessment_id, a.schema_version, a.methodology_version, a.assessment_hash,
-                  t.name, t.symbol
-           FROM market_assessments a JOIN tokens t ON t.address = a.token_address
-           WHERE a.token_address = $1 ORDER BY a.assessment_date DESC LIMIT 1`, [address]);
-        const metricResult = await pool.query<Record<string, unknown>>(
-          `SELECT date::text AS date, holder_count, new_holders, active_holders, transfer_count,
-                unique_senders, unique_receivers, top1_concentration, top5_concentration, top10_concentration
-           FROM daily_metrics WHERE token_address = $1 ORDER BY date DESC LIMIT 1`, [address]);
-        const assessment = assessmentResult.rows[0] ? canonicalAssessment({ ...assessmentResult.rows[0], token_address: address }) : null;
-        const configuredContract = process.env['ATTESTATION_CONTRACT_ADDRESS'];
-        const isConfigured = Boolean(configuredContract && isAddress(configuredContract));
-        let attestation: Record<string, unknown> = { configured: isConfigured, attested: false, data_matches: false,
-          contract_address: isConfigured ? configuredContract : null, chain_id: Number(process.env['CHAIN_ID'] ?? ELYSIUM_TESTNET_CHAIN_ID),
-          transaction_hash: null, block_number: null };
-        if (assessmentResult.rows[0]?.assessment_id) {
-          const saved = await pool.query<Record<string, unknown>>(
-            `SELECT contract_address, chain_id, transaction_hash, block_number FROM assessment_attestations WHERE LOWER(assessment_id)=LOWER($1) LIMIT 1`,
-            [assessmentResult.rows[0].assessment_id]);
-          if (saved.rows[0]) {
-            attestation = { ...attestation, attested: true, contract_address: saved.rows[0].contract_address,
-              chain_id: Number(saved.rows[0].chain_id), transaction_hash: saved.rows[0].transaction_hash, block_number: Number(saved.rows[0].block_number) };
-            if (isConfigured) {
-              try {
-                const check = await verifyAssessment(pool, String(assessmentResult.rows[0].assessment_id));
-                attestation.data_matches = check.onchain_attested ? check.onchain_data_matches : null;
-                if (check.onchain_attested && !check.onchain_data_matches) attestation.mismatch = true;
-              } catch { attestation.data_matches = null; }
-            }
-          }
-        }
-        sendJson(res, 200, { token, latest_assessment: assessment, latest_metrics: metricResult.rows[0] ?? null, attestation });
-        return;
-      }
 
       const page = pagination(parsedUrl);
       const dates = dateFilters(parsedUrl);
