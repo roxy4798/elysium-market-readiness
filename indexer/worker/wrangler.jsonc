@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+  "name": "elysium-market-readiness-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-04",
+  "workers_dev": true,
+  "limits": { "cpu_ms": 10 },
+  "vars": {
+    "ATTESTATION_ENABLED": "false",
+    "ATTESTATION_CONTRACT_ADDRESS": "0x149832ec7f9eb3729ec1682b86e026c0af5a9d61",
+    "CHAIN_ID": "99801",
+    "RPC_URL": "https://testnet-rpc.elysium.kinetiq.xyz"
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "00000000-0000-0000-0000-000000000001"
+    }
+  ]
+}

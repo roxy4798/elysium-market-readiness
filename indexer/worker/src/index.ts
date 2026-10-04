@@ -1,0 +1,61 @@
+import { httpServerHandler } from 'cloudflare:node';
+import pg from 'pg';
+import { createApiServer } from '../../src/api/server.js';
+import type { Queryable } from '../../src/database.js';
+
+interface WorkerEnv {
+  HYPERDRIVE: { connectionString: string };
+}
+
+const INTERNAL_ROUTE_KEY = 8672;
+let nextRouteKey = INTERNAL_ROUTE_KEY;
+
+type HttpHandler = ReturnType<typeof httpServerHandler>;
+type WorkerRequest = Parameters<NonNullable<HttpHandler['fetch']>>[0];
+type WorkerContext = Parameters<NonNullable<HttpHandler['fetch']>>[2];
+
+function createRequestHandler(connectionString: string) {
+  const pool = new pg.Pool({
+    connectionString,
+    max: 5,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 10_000,
+  });
+
+  // The public Worker surface is read-only. Keep this guard at the database
+  // boundary as a second line of defense against future write routes.
+  const database: Queryable = {
+    async query<R extends pg.QueryResultRow = pg.QueryResultRow>(text: string, values?: unknown[]) {
+      if (!/^\s*SELECT\b/i.test(text)) throw new Error('Worker database adapter allows SELECT statements only');
+      return pool.query<R>(text, values as unknown[] | undefined);
+    },
+  };
+
+  const server = createApiServer(database);
+  nextRouteKey = nextRouteKey >= 32000 ? INTERNAL_ROUTE_KEY : nextRouteKey + 1;
+  server.listen(nextRouteKey);
+  return { pool, server, handler: httpServerHandler({ port: nextRouteKey }) };
+}
+
+export default {
+  async fetch(request: WorkerRequest, env: WorkerEnv, ctx: WorkerContext): Promise<Response> {
+    // The adapter is deliberately read-only even if deployment variables are
+    // changed later. The original route remains reachable and returns the same
+    // disabled response, before any DB lookup or signer code can run.
+    process.env['ATTESTATION_ENABLED'] = 'false';
+    delete process.env['ATTESTATION_API_SECRET'];
+    delete process.env['ATTESTER_PRIVATE_KEY'];
+
+    const { pool, server, handler } = createRequestHandler(env.HYPERDRIVE.connectionString);
+    try {
+      const fetchHandler = handler.fetch;
+      if (!fetchHandler) throw new Error('Cloudflare Node HTTP handler is unavailable');
+      return await fetchHandler(request, env, ctx);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+      await pool.end();
+    }
+  },
+};
