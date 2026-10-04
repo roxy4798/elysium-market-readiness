@@ -7,10 +7,10 @@
 import { fileURLToPath } from 'node:url';
 import { createElysiumClient, isTransientError, withRetry } from './client.js';
 import { ConfigError, ELYSIUM_TESTNET_CHAIN_ID, loadConfig, redactUrl, type IndexerConfig } from './config.js';
-import { readCheckpoint } from './checkpoint.js';
+import { readCheckpoint, safeTargetBlock } from './checkpoint.js';
 import { PgStore } from './database.js';
 import { RULE, logger } from './logger.js';
-import { Scanner, runIndexer, viemChainReader, type IdleReport, type RangeReport } from './scanner.js';
+import { HistoricalBackfiller, Scanner, runIndexer, viemChainReader, type IdleReport, type RangeReport } from './scanner.js';
 import { TokenValidator, viemContractReader } from './token-validator.js';
 import { TRANSFER_TOPIC } from './abi/erc20.js';
 import {
@@ -52,12 +52,14 @@ async function cmdRun(config: IndexerConfig): Promise<number> {
   }
 
   const store = await connectDatabase(config);
+  let releaseLock: (() => Promise<void>) | undefined;
   try {
     const missing = await store.missingTables();
     if (missing.length > 0) {
       logger.error('database schema missing — run `npm run migrate`', { missing: missing.join(',') });
       return 2;
     }
+    releaseLock = await store.acquireIndexerLock();
 
     const validator = new TokenValidator(viemContractReader(client), retry);
     const scanner = new Scanner(chain, store, validator, config);
@@ -127,6 +129,87 @@ async function cmdRun(config: IndexerConfig): Promise<number> {
     ]);
     return 0;
   } finally {
+    if (releaseLock) await releaseLock();
+    await store.close();
+  }
+}
+
+async function cmdBackfill(config: IndexerConfig): Promise<number> {
+  const argv = process.argv.slice(3);
+  let tokenAddress: string | undefined;
+  let fromBlockRaw: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--token' && argv[i + 1]) tokenAddress = argv[++i];
+    else if (arg === '--from-block' && argv[i + 1]) fromBlockRaw = argv[++i];
+    else if (arg === '--help' || arg === '-h') {
+      console.log('Usage: npm run backfill -- --token <address> --from-block <block>\n\nReplays confirmed historical Transfer logs for one indexed token, reconciles existing event rows, rebuilds that token\'s balances atomically, and leaves the normal global checkpoint unchanged. The scan end is the greater of the existing checkpoint and current confirmed RPC head.');
+      return 0;
+    } else {
+      logger.error(`unknown backfill argument "${arg}"`);
+      return 2;
+    }
+  }
+  if (!tokenAddress || !fromBlockRaw || !/^\d+$/.test(fromBlockRaw)) {
+    logger.error('backfill requires --token <address> and --from-block <non-negative integer>');
+    return 2;
+  }
+
+  const client = createElysiumClient(config);
+  const chain = viemChainReader(client);
+  const chainId = await withRetry(() => chain.getChainId(), {
+    maxRetries: config.rpcMaxRetries, baseDelayMs: config.rpcRetryBaseDelayMs, label: 'eth_chainId',
+  });
+  if (chainId !== config.chainId) {
+    logger.error('chain id mismatch — refusing historical backfill', { expected: config.chainId, actual: chainId });
+    return 2;
+  }
+
+  const store = await connectDatabase(config);
+  try {
+    const missing = await store.missingTables();
+    if (missing.length) {
+      logger.error('database schema missing — run `npm run migrate`', { missing: missing.join(',') });
+      return 2;
+    }
+    const latest = await chain.getBlockNumber();
+    const safeTarget = safeTargetBlock(latest, config.confirmationBlocks, config.stopBlock);
+    if (safeTarget === null) throw new Error('chain has no confirmed block range available');
+    const checkpointBefore = await store.getCheckpoint();
+    const targetBlock = checkpointBefore !== null && checkpointBefore > safeTarget ? checkpointBefore : safeTarget;
+    if (targetBlock > latest) throw new Error(`global checkpoint ${targetBlock} is ahead of RPC head ${latest}`);
+
+    const validator = new TokenValidator(viemContractReader(client), {
+      maxRetries: config.rpcMaxRetries, baseDelayMs: config.rpcRetryBaseDelayMs,
+    });
+    const backfiller = new HistoricalBackfiller(chain, store, validator, config);
+    logger.block('HISTORICAL TOKEN BACKFILL', [
+      ['Chain ID', chainId], ['Token', tokenAddress], ['Historical Start', BigInt(fromBlockRaw)],
+      ['Global Checkpoint Before', checkpointBefore ?? 'none'], ['RPC Head', latest], ['Confirmed Target', targetBlock],
+      ['Status', 'RUNNING'],
+    ]);
+    const result = await backfiller.run(tokenAddress, BigInt(fromBlockRaw), targetBlock, (range) => {
+      if (range.insertedTransfers || range.duplicateTransfers) {
+        logger.debug('historical range committed', {
+          from: range.fromBlock, to: range.toBlock,
+          inserted: range.insertedTransfers, reconciledDuplicates: range.duplicateTransfers,
+          batchSize: range.batchSize,
+        });
+      }
+    });
+    const checkpointAfter = await store.getCheckpoint();
+    logger.block('HISTORICAL BACKFILL RECONCILED', [
+      ['Token', result.tokenAddress], ['Block Range', `${result.startBlock} → ${result.targetBlock}`],
+      ['Ranges', result.ranges], ['Blocks Scanned', result.blocks],
+      ['Transfers Inserted', result.insertedTransfers], ['Existing Transfers Reconciled', result.duplicateTransfers],
+      ['Persisted Transfer Count', result.reconciliation.transferCount], ['Balance Rows', result.reconciliation.balanceRows],
+      ['Balance Anomalies', result.reconciliation.anomalyCount],
+      ['Reconciled Through', result.reconciliation.reconciledThroughBlock],
+      ['Global Checkpoint Before / After', `${checkpointBefore ?? 'none'} / ${checkpointAfter ?? 'none'}`],
+      ['Status', result.reconciliation.anomalyCount === 0 && checkpointAfter === checkpointBefore ? 'COMPLETE' : 'INTEGRITY CHECK REQUIRED'],
+    ]);
+    return result.reconciliation.anomalyCount === 0 && checkpointAfter === checkpointBefore ? 0 : 1;
+  } finally {
     await store.close();
   }
 }
@@ -179,7 +262,7 @@ async function cmdDoctor(config: IndexerConfig): Promise<number> {
       const tablesOk = await check('Required tables exist', async () => {
         const missing = await store.missingTables();
         if (missing.length > 0) throw new Error(`missing: ${missing.join(', ')} — run npm run migrate`);
-        return 'tokens, transfers, balances, indexer_state, daily_metrics, market_assessments, assessment_attestations';
+        return 'tokens, transfers, balances, indexer_state, historical_backfill_state, daily_metrics, market_assessments, assessment_attestations';
       });
       if (tablesOk) {
         await check('Checkpoint', async () => {
@@ -601,6 +684,8 @@ async function main(): Promise<number> {
   switch (cmd) {
     case 'run':
       return cmdRun(config);
+    case 'backfill':
+      return cmdBackfill(config);
     case 'doctor':
       return cmdDoctor(config);
     case 'migrate':
@@ -614,7 +699,7 @@ async function main(): Promise<number> {
     case 'attest':
       return cmdAttest(config);
     default:
-      logger.error(`unknown command "${cmd}" (expected run | doctor | migrate | metrics | assess | serve | attest)`);
+      logger.error(`unknown command "${cmd}" (expected run | backfill | doctor | migrate | metrics | assess | serve | attest)`);
       return 2;
   }
 }

@@ -2,15 +2,15 @@
  * Block-range scanner: plans the next confirmed range, fetches Transfer logs with
  * adaptive range sizing, validates token candidates, resolves timestamps and commits.
  */
-import { toHex, type PublicClient } from 'viem';
+import { isAddress, toHex, type PublicClient } from 'viem';
 import { TRANSFER_TOPIC } from './abi/erc20.js';
 import { nextBlockToProcess, safeTargetBlock } from './checkpoint.js';
 import { isRangeTooLargeError, isTransientError, sleep, withRetry, type RetryOptions } from './client.js';
 import type { IndexerConfig } from './config.js';
-import type { Store, StoredTransfer, TokenUpsert } from './database.js';
+import type { HistoricalBackfillState, Store, StoredTransfer, TokenUpsert } from './database.js';
 import { logger } from './logger.js';
 import type { TokenValidator } from './token-validator.js';
-import { commitRange, decodeTransferLog, type DecodedTransfer, type RawLog } from './transfer-processor.js';
+import { commitRange, decodeTransferLog, normalizeAddress, type DecodedTransfer, type RawLog } from './transfer-processor.js';
 
 // ---------------------------------------------------------------------------
 // Chain access abstraction
@@ -19,7 +19,7 @@ import { commitRange, decodeTransferLog, type DecodedTransfer, type RawLog } fro
 export interface ChainReader {
   getChainId(): Promise<number>;
   getBlockNumber(): Promise<bigint>;
-  getTransferLogs(fromBlock: bigint, toBlock: bigint): Promise<RawLog[]>;
+  getTransferLogs(fromBlock: bigint, toBlock: bigint, address?: string): Promise<RawLog[]>;
   getBlockTimestamp(blockNumber: bigint): Promise<bigint>;
 }
 
@@ -27,11 +27,11 @@ export function viemChainReader(client: PublicClient): ChainReader {
   return {
     getChainId: () => client.getChainId(),
     getBlockNumber: () => client.getBlockNumber({ cacheTime: 0 }),
-    async getTransferLogs(fromBlock, toBlock) {
+    async getTransferLogs(fromBlock, toBlock, address) {
       // Raw request: keeps node-provided fields such as `blockTimestamp` intact.
       const logs = await client.request({
         method: 'eth_getLogs',
-        params: [{ fromBlock: toHex(fromBlock), toBlock: toHex(toBlock), topics: [TRANSFER_TOPIC] }],
+        params: [{ fromBlock: toHex(fromBlock), toBlock: toHex(toBlock), ...(address ? { address: address as `0x${string}` } : {}), topics: [TRANSFER_TOPIC] }],
       });
       return logs as unknown as RawLog[];
     },
@@ -97,12 +97,12 @@ export class AdaptiveLogFetcher {
     return this.size;
   }
 
-  async fetch(fromBlock: bigint, maxTo: bigint): Promise<FetchResult> {
+  async fetch(fromBlock: bigint, maxTo: bigint, address?: string): Promise<FetchResult> {
     for (;;) {
       const span = BigInt(this.size - 1);
       const toBlock = fromBlock + span < maxTo ? fromBlock + span : maxTo;
       try {
-        const logs = await withRetry(() => this.chain.getTransferLogs(fromBlock, toBlock), {
+        const logs = await withRetry(() => this.chain.getTransferLogs(fromBlock, toBlock, address), {
           ...this.retry,
           // Range errors are handled by shrinking, not by retrying the same request.
           isRetryable: (e) => !isRangeTooLargeError(e) && isTransientError(e),
@@ -400,6 +400,126 @@ export class Scanner {
       anomalies: res.anomalies.length,
       checkpoint: toBlock,
     };
+  }
+}
+
+export interface HistoricalBackfillReport {
+  readonly tokenAddress: string;
+  readonly startBlock: bigint;
+  readonly targetBlock: bigint;
+  readonly ranges: number;
+  readonly blocks: bigint;
+  readonly insertedTransfers: number;
+  readonly duplicateTransfers: number;
+  readonly reconciliation: Awaited<ReturnType<Store['rebuildTokenBalances']>>;
+}
+
+/**
+ * Token-scoped historical replay. Its cursor is independent of the normal global
+ * checkpoint; the final balance replacement is serialized with normal indexing by
+ * PgStore's shared advisory lock.
+ */
+export class HistoricalBackfiller {
+  readonly fetcher: AdaptiveLogFetcher;
+  readonly timestamps: BlockTimestampCache;
+  private readonly retry: Omit<RetryOptions, 'label'>;
+
+  constructor(
+    private readonly chain: ChainReader,
+    private readonly store: Store,
+    private readonly validator: TokenValidator,
+    private readonly config: ScannerConfig,
+    retryOverrides: Partial<Omit<RetryOptions, 'label'>> = {},
+  ) {
+    this.retry = { maxRetries: config.rpcMaxRetries, baseDelayMs: config.rpcRetryBaseDelayMs, ...retryOverrides };
+    this.fetcher = new AdaptiveLogFetcher(chain, config.blockBatchSize, config.minBlockBatchSize, this.retry);
+    this.timestamps = new BlockTimestampCache(chain, this.retry, config.rpcConcurrency);
+  }
+
+  async run(
+    rawAddress: string,
+    startBlock: bigint,
+    requestedTargetBlock: bigint,
+    onRange?: (range: FetchResult & { insertedTransfers: number; duplicateTransfers: number }) => void,
+  ): Promise<HistoricalBackfillReport> {
+    if (!isAddress(rawAddress)) throw new Error(`invalid token address: ${rawAddress}`);
+    if (startBlock < 0n || requestedTargetBlock < startBlock) throw new Error('invalid historical backfill bounds');
+    const address = normalizeAddress(rawAddress);
+    const releaseLock = await this.store.acquireIndexerLock();
+    try {
+      const validation = await this.validator.validate(address);
+      if (!validation.valid) throw new Error(`historical backfill token validation failed: ${validation.reason}`);
+      const state: HistoricalBackfillState = await this.store.prepareHistoricalBackfill(address, startBlock, requestedTargetBlock);
+      let nextBlock = state.nextBlock;
+      let ranges = 0;
+      let blocks = 0n;
+      let insertedTransfers = 0;
+      let duplicateTransfers = 0;
+
+      while (nextBlock <= state.targetBlock) {
+        const fetched = await this.fetcher.fetch(nextBlock, state.targetBlock, address);
+        const decoded: DecodedTransfer[] = [];
+        for (const log of fetched.logs) {
+          const result = decodeTransferLog(log);
+          if (!result.ok) continue;
+          if (result.transfer.tokenAddress !== address) throw new Error('RPC returned a historical log for a different token address');
+          if (result.transfer.blockNumber < fetched.fromBlock || result.transfer.blockNumber > fetched.toBlock) {
+            throw new Error(`RPC returned log outside requested range ${fetched.fromBlock}-${fetched.toBlock}`);
+          }
+          decoded.push(result.transfer);
+        }
+
+        for (const transfer of decoded) if (transfer.logTimestamp !== null) this.timestamps.seed(transfer.blockNumber, transfer.logTimestamp);
+        const timestamps = await this.timestamps.resolve(decoded.map((transfer) => transfer.blockNumber));
+        const transfers: StoredTransfer[] = decoded.map((transfer) => {
+          const timestamp = timestamps.get(transfer.blockNumber);
+          if (timestamp === undefined) throw new Error(`missing timestamp for block ${transfer.blockNumber}`);
+          return {
+            tokenAddress: address,
+            txHash: transfer.txHash,
+            logIndex: transfer.logIndex,
+            blockNumber: transfer.blockNumber,
+            blockTimestamp: new Date(Number(timestamp) * 1000),
+            from: transfer.from,
+            to: transfer.to,
+            amount: transfer.amount,
+          };
+        });
+        const token: TokenUpsert = {
+          address,
+          name: validation.metadata.name,
+          symbol: validation.metadata.symbol,
+          decimals: validation.metadata.decimals,
+          totalSupply: validation.metadata.totalSupply,
+          firstSeenBlock: transfers.length ? transfers.reduce((min, t) => t.blockNumber < min ? t.blockNumber : min, transfers[0]!.blockNumber) : state.startBlock,
+          lastSeenBlock: transfers.length ? transfers.reduce((max, t) => t.blockNumber > max ? t.blockNumber : max, transfers[0]!.blockNumber) : state.startBlock,
+        };
+        const stored = await this.store.commitHistoricalBackfillRange({
+          token, expectedNextBlock: nextBlock, fromBlock: fetched.fromBlock, toBlock: fetched.toBlock, transfers,
+        });
+        ranges++;
+        blocks += fetched.toBlock - fetched.fromBlock + 1n;
+        insertedTransfers += stored.insertedTransfers;
+        duplicateTransfers += stored.duplicateTransfers;
+        onRange?.({ ...fetched, insertedTransfers: stored.insertedTransfers, duplicateTransfers: stored.duplicateTransfers });
+        this.timestamps.pruneBelow(fetched.toBlock);
+        nextBlock = fetched.toBlock + 1n;
+      }
+
+      const reconciliation = await this.store.rebuildTokenBalances(address);
+      return {
+        tokenAddress: address,
+        startBlock: state.startBlock,
+        targetBlock: state.targetBlock,
+        ranges,
+        blocks,
+        insertedTransfers,
+        duplicateTransfers,
+        reconciliation,
+      };
+    } finally {
+      await releaseLock();
+    }
   }
 }
 

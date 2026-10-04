@@ -74,7 +74,7 @@ export class FakeChain implements ChainReader {
   async getBlockNumber(): Promise<bigint> {
     return this.head;
   }
-  async getTransferLogs(from: bigint, to: bigint): Promise<RawLog[]> {
+  async getTransferLogs(from: bigint, to: bigint, address?: string): Promise<RawLog[]> {
     this.getLogsCalls.push([from, to]);
     const e = this.logErrors.shift();
     if (e) throw e;
@@ -83,7 +83,7 @@ export class FakeChain implements ChainReader {
     }
     return this.logs.filter((l) => {
       const b = BigInt(l.blockNumber ?? '0x0');
-      return b >= from && b <= to;
+      return b >= from && b <= to && (!address || l.address.toLowerCase() === address.toLowerCase());
     });
   }
   async getBlockTimestamp(n: bigint): Promise<bigint> {

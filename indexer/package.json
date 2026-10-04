@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js run",
     "migrate": "tsx src/main.ts migrate",
+    "backfill": "tsx src/main.ts backfill",
     "doctor": "tsx src/main.ts doctor",
     "metrics": "tsx src/main.ts metrics",
     "assess": "tsx src/main.ts assess",

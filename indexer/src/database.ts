@@ -7,7 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { readCheckpoint, writeCheckpoint } from './checkpoint.js';
-import { balanceKey, type BalanceUpdate } from './holder-engine.js';
+import { applyTransfers, balanceKey, type BalanceTransfer, type BalanceUpdate } from './holder-engine.js';
 import { logger } from './logger.js';
 
 export interface Queryable {
@@ -36,7 +36,29 @@ export interface StoredTransfer {
   readonly amount: bigint;
 }
 
+export interface HistoricalBackfillState {
+  readonly tokenAddress: string;
+  readonly startBlock: bigint;
+  readonly targetBlock: bigint;
+  /** First block not yet committed by this token-scoped replay. */
+  readonly nextBlock: bigint;
+  readonly reconciledThroughBlock: bigint | null;
+}
+
+export interface HistoricalRangeCommit {
+  readonly insertedTransfers: number;
+  readonly duplicateTransfers: number;
+}
+
+export interface BalanceRebuildResult {
+  readonly transferCount: number;
+  readonly balanceRows: number;
+  readonly anomalyCount: number;
+  readonly reconciledThroughBlock: bigint;
+}
+
 export interface TxRepo {
+  query<R extends pg.QueryResultRow = pg.QueryResultRow>(text: string, values?: unknown[]): Promise<pg.QueryResult<R>>;
   /** Returns addresses that were newly inserted. */
   upsertTokens(tokens: readonly TokenUpsert[]): Promise<Set<string>>;
   /** Inserts with ON CONFLICT DO NOTHING; returns only rows that were actually inserted. */
@@ -52,6 +74,19 @@ export interface Store {
   getCheckpoint(): Promise<bigint | null>;
   getKnownTokens(addresses: readonly string[]): Promise<Set<string>>;
   transaction<T>(fn: (repo: TxRepo) => Promise<T>): Promise<T>;
+  /** Dedicated token history cursor; intentionally separate from indexer_state. */
+  prepareHistoricalBackfill(tokenAddress: string, startBlock: bigint, targetBlock: bigint): Promise<HistoricalBackfillState>;
+  commitHistoricalBackfillRange(input: {
+    token: TokenUpsert;
+    expectedNextBlock: bigint;
+    fromBlock: bigint;
+    toBlock: bigint;
+    transfers: readonly StoredTransfer[];
+  }): Promise<HistoricalRangeCommit>;
+  /** Atomically replace one token's balances from its complete persisted transfer ledger. */
+  rebuildTokenBalances(tokenAddress: string): Promise<BalanceRebuildResult>;
+  /** Mutual exclusion for normal forward indexing and historical backfill. */
+  acquireIndexerLock(): Promise<() => Promise<void>>;
   close(): Promise<void>;
 }
 
@@ -60,6 +95,7 @@ export const REQUIRED_TABLES = [
   'transfers',
   'balances',
   'indexer_state',
+  'historical_backfill_state',
   'daily_metrics',
   'market_assessments',
   'assessment_attestations',
@@ -73,11 +109,49 @@ function chunks<T>(arr: readonly T[], size = CHUNK): T[][] {
   return out;
 }
 
+function expectedPgTimestamp(date: Date): string {
+  return `${date.toISOString().slice(0, -1).replace('T', ' ')}000`;
+}
+
+/** Existing unique keys are accepted only when every persisted event field agrees with the RPC replay. */
+async function verifyStoredTransfers(q: Queryable, transfers: readonly StoredTransfer[]): Promise<void> {
+  for (const part of chunks(transfers, 1000)) {
+    const result = await q.query<{
+      tx_hash: string; log_index: number; token_address: string; block_number: string;
+      block_timestamp: string; from_address: string; to_address: string; amount: string;
+    }>(
+      `SELECT t.tx_hash, t.log_index, t.token_address, t.block_number::text,
+              to_char(t.block_timestamp, 'YYYY-MM-DD HH24:MI:SS.US') AS block_timestamp,
+              t.from_address, t.to_address, t.amount::text
+       FROM transfers t
+       JOIN unnest($1::varchar[], $2::int[]) AS expected(tx_hash, log_index)
+         ON t.tx_hash = expected.tx_hash AND t.log_index = expected.log_index`,
+      [part.map((t) => t.txHash), part.map((t) => t.logIndex)],
+    );
+    const byKey = new Map(result.rows.map((r) => [`${r.tx_hash}:${r.log_index}`, r]));
+    for (const expected of part) {
+      const actual = byKey.get(`${expected.txHash}:${expected.logIndex}`);
+      if (!actual) throw new Error(`historical transfer ${expected.txHash}:${expected.logIndex} was not persisted`);
+      const matches = actual.token_address === expected.tokenAddress
+        && BigInt(actual.block_number) === expected.blockNumber
+        && actual.block_timestamp === expectedPgTimestamp(expected.blockTimestamp)
+        && actual.from_address === expected.from
+        && actual.to_address === expected.to
+        && BigInt(actual.amount) === expected.amount;
+      if (!matches) throw new Error(`persisted transfer ${expected.txHash}:${expected.logIndex} conflicts with the canonical RPC event`);
+    }
+  }
+}
+
 /** UTC wall-clock string for TIMESTAMP (without time zone) columns. */
 export const toPgTimestamp = (d: Date): string => d.toISOString().replace('Z', '');
 
 class PgTxRepo implements TxRepo {
   constructor(private readonly q: Queryable) {}
+
+  query<R extends pg.QueryResultRow = pg.QueryResultRow>(text: string, values?: unknown[]): Promise<pg.QueryResult<R>> {
+    return this.q.query<R>(text, values);
+  }
 
   async upsertTokens(tokens: readonly TokenUpsert[]): Promise<Set<string>> {
     const inserted = new Set<string>();
@@ -212,6 +286,174 @@ export class PgStore implements Store {
       [addresses],
     );
     return new Set(res.rows.map((r) => r.address));
+  }
+
+  async acquireIndexerLock(): Promise<() => Promise<void>> {
+    const client = await this.pool.connect();
+    const lockKey = '810809299801';
+    try {
+      const result = await client.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_lock($1::bigint) AS locked', [lockKey],
+      );
+      if (!result.rows[0]?.locked) throw new Error('another indexer or historical backfill operation already holds the database lock');
+    } catch (err) {
+      client.release();
+      throw err;
+    }
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query('SELECT pg_advisory_unlock($1::bigint)', [lockKey]);
+      } finally {
+        client.release();
+      }
+    };
+  }
+
+  async prepareHistoricalBackfill(tokenAddress: string, startBlock: bigint, targetBlock: bigint): Promise<HistoricalBackfillState> {
+    if (startBlock < 0n || targetBlock < startBlock) throw new Error('invalid historical backfill bounds');
+    const result = await this.pool.query<{
+      token_address: string; start_block: string; target_block: string; next_block: string; reconciled_through_block: string | null;
+    }>(
+      `INSERT INTO historical_backfill_state (token_address, start_block, target_block, next_block)
+       SELECT address, $2, $3, $2 FROM tokens WHERE address = LOWER($1)
+       ON CONFLICT (token_address) DO UPDATE SET
+         start_block = LEAST(historical_backfill_state.start_block, EXCLUDED.start_block),
+         target_block = GREATEST(historical_backfill_state.target_block, EXCLUDED.target_block),
+         next_block = CASE WHEN EXCLUDED.start_block < historical_backfill_state.start_block
+                           THEN EXCLUDED.start_block ELSE historical_backfill_state.next_block END,
+         reconciled_through_block = CASE
+           WHEN EXCLUDED.start_block < historical_backfill_state.start_block
+             OR EXCLUDED.target_block > historical_backfill_state.target_block THEN NULL
+           ELSE historical_backfill_state.reconciled_through_block END,
+         updated_at = NOW()
+       RETURNING token_address, start_block::text, target_block::text, next_block::text,
+                 reconciled_through_block::text`,
+      [tokenAddress.toLowerCase(), startBlock.toString(), targetBlock.toString()],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error(`token ${tokenAddress} is not present in the indexed token table`);
+    return {
+      tokenAddress: row.token_address,
+      startBlock: BigInt(row.start_block),
+      targetBlock: BigInt(row.target_block),
+      nextBlock: BigInt(row.next_block),
+      reconciledThroughBlock: row.reconciled_through_block === null ? null : BigInt(row.reconciled_through_block),
+    };
+  }
+
+  async commitHistoricalBackfillRange(input: {
+    token: TokenUpsert; expectedNextBlock: bigint; fromBlock: bigint; toBlock: bigint; transfers: readonly StoredTransfer[];
+  }): Promise<HistoricalRangeCommit> {
+    if (input.fromBlock !== input.expectedNextBlock || input.toBlock < input.fromBlock) {
+      throw new Error('historical backfill range is not contiguous');
+    }
+    for (const transfer of input.transfers) {
+      if (transfer.tokenAddress !== input.token.address || transfer.blockNumber < input.fromBlock || transfer.blockNumber > input.toBlock) {
+        throw new Error('historical transfer does not match its token/range');
+      }
+    }
+    return this.transaction(async (repo) => {
+      const lock = await repo.query<{ address: string }>(
+        'SELECT address FROM tokens WHERE address = $1 FOR UPDATE', [input.token.address],
+      );
+      if (!lock.rows[0]) throw new Error(`token ${input.token.address} is not present in the indexed token table`);
+      const cursor = await repo.query<{ next_block: string }>(
+        'SELECT next_block::text FROM historical_backfill_state WHERE token_address = $1 FOR UPDATE', [input.token.address],
+      );
+      if (!cursor.rows[0] || BigInt(cursor.rows[0].next_block) !== input.expectedNextBlock) {
+        throw new Error('historical backfill cursor changed; refusing to skip or replay an unverified range');
+      }
+
+      if (input.transfers.length) await repo.upsertTokens([input.token]);
+      const inserted = await repo.insertTransfers(input.transfers);
+      await verifyStoredTransfers(repo, input.transfers);
+
+      const advanced = await repo.query(
+        `UPDATE historical_backfill_state SET next_block = $3, reconciled_through_block = NULL, updated_at = NOW()
+         WHERE token_address = $1 AND next_block = $2`,
+        [input.token.address, input.expectedNextBlock.toString(), (input.toBlock + 1n).toString()],
+      );
+      if (advanced.rowCount !== 1) throw new Error('historical backfill cursor compare-and-set failed');
+      return { insertedTransfers: inserted.length, duplicateTransfers: input.transfers.length - inserted.length };
+    });
+  }
+
+  async rebuildTokenBalances(tokenAddress: string): Promise<BalanceRebuildResult> {
+    const address = tokenAddress.toLowerCase();
+    return this.transaction(async (repo) => {
+      const token = await repo.query<{ address: string }>(
+        'SELECT address FROM tokens WHERE address = $1 FOR UPDATE', [address],
+      );
+      if (!token.rows[0]) throw new Error(`token ${address} is not present in the indexed token table`);
+      const state = await repo.query<{ start_block: string; target_block: string; next_block: string }>(
+        'SELECT start_block::text, target_block::text, next_block::text FROM historical_backfill_state WHERE token_address = $1 FOR UPDATE', [address],
+      );
+      const cursor = state.rows[0];
+      if (!cursor || BigInt(cursor.next_block) <= BigInt(cursor.target_block)) {
+        throw new Error('historical replay is incomplete; balances cannot be reconciled yet');
+      }
+
+      const balances = new Map<string, bigint>();
+      const lastUpdates = new Map<string, BalanceUpdate>();
+      let transferCount = 0;
+      let anomalyCount = 0;
+      let lastBlock = BigInt(cursor.start_block);
+      let pageBlock = -1n;
+      let pageLogIndex = -1;
+      const pageSize = 5000;
+      for (;;) {
+        const page = await repo.query<{
+          token_address: string; block_number_text: string; log_index: number; tx_hash: string;
+          from_address: string; to_address: string; amount: string;
+        }>(
+          `SELECT token_address, block_number::text AS block_number_text, log_index, tx_hash, from_address, to_address, amount::text
+           FROM transfers
+           WHERE token_address = $1 AND (block_number > $2 OR (block_number = $2 AND log_index > $3))
+           ORDER BY transfers.block_number ASC, transfers.log_index ASC LIMIT $4`,
+          [address, pageBlock.toString(), pageLogIndex, pageSize],
+        );
+        if (!page.rows.length) break;
+        const transfers: BalanceTransfer[] = page.rows.map((row) => ({
+          tokenAddress: row.token_address,
+          blockNumber: BigInt(row.block_number_text),
+          logIndex: row.log_index,
+          txHash: row.tx_hash,
+          from: row.from_address,
+          to: row.to_address,
+          amount: BigInt(row.amount),
+        }));
+        const result = applyTransfers(balances, transfers);
+        for (const update of result.updates) {
+          const key = balanceKey(update.tokenAddress, update.holderAddress);
+          balances.set(key, update.balance);
+          lastUpdates.set(key, update);
+        }
+        transferCount += transfers.length;
+        anomalyCount += result.anomalies.length;
+        const final = page.rows[page.rows.length - 1]!;
+        pageBlock = BigInt(final.block_number_text);
+        pageLogIndex = final.log_index;
+        lastBlock = pageBlock;
+      }
+
+      // All new state is computed before existing balances are touched. The delete,
+      // replacement, anomaly count, and reconciliation marker commit atomically.
+      await repo.query('DELETE FROM balances WHERE token_address = $1', [address]);
+      await repo.saveBalances([...lastUpdates.values()]);
+      await repo.query(
+        'UPDATE tokens SET balance_anomalies = $2, updated_at = NOW() WHERE address = $1',
+        [address, anomalyCount],
+      );
+      const reconciledThroughBlock = lastBlock > BigInt(cursor.target_block) ? lastBlock : BigInt(cursor.target_block);
+      await repo.query(
+        'UPDATE historical_backfill_state SET reconciled_through_block = $2, updated_at = NOW() WHERE token_address = $1',
+        [address, reconciledThroughBlock.toString()],
+      );
+      return { transferCount, balanceRows: lastUpdates.size, anomalyCount, reconciledThroughBlock };
+    });
   }
 
   async transaction<T>(fn: (repo: TxRepo) => Promise<T>): Promise<T> {

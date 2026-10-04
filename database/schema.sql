@@ -52,6 +52,17 @@ CREATE TABLE IF NOT EXISTS indexer_state (
     updated_at            TIMESTAMP DEFAULT NOW()
 );
 
+-- Historical token-scoped replay has its own contiguous cursor. It never rewinds
+-- or advances the normal chain-wide indexer checkpoint.
+CREATE TABLE IF NOT EXISTS historical_backfill_state (
+    token_address              VARCHAR(42) PRIMARY KEY REFERENCES tokens(address),
+    start_block                BIGINT NOT NULL CHECK (start_block >= 0),
+    target_block               BIGINT NOT NULL CHECK (target_block >= start_block),
+    next_block                 BIGINT NOT NULL CHECK (next_block >= start_block),
+    reconciled_through_block   BIGINT,
+    updated_at                 TIMESTAMP DEFAULT NOW()
+);
+
 -- Phase 2A: Deterministic daily market metrics
 CREATE TABLE IF NOT EXISTS daily_metrics (
     token_address       VARCHAR(42) NOT NULL REFERENCES tokens(address) ON DELETE CASCADE,
