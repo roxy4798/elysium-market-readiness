@@ -21,6 +21,7 @@ import {
   AssessmentInsufficientDataError,
   AssessmentNotFoundError,
   AttestationConfigError,
+  AttestationConflictError,
   CanonicalVerificationError,
 } from '../attestation/attestation-service.js';
 import { logger } from '../logger.js';
@@ -433,6 +434,10 @@ export async function handleRequest(
         }
         if (err instanceof CanonicalVerificationError) {
           sendError(res, 422, err.message);
+          return;
+        }
+        if (err instanceof AttestationConflictError) {
+          sendError(res, 409, err.message);
           return;
         }
         if (err instanceof AttestationConfigError) {

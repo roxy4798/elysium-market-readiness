@@ -5,8 +5,10 @@
  *   migrate  — apply database/schema.sql (idempotent)
  */
 import { fileURLToPath } from 'node:url';
+import { isAddress } from 'viem';
 import { createElysiumClient, isTransientError, withRetry } from './client.js';
 import { ConfigError, ELYSIUM_TESTNET_CHAIN_ID, loadConfig, redactUrl, type IndexerConfig } from './config.js';
+import { readAttestationGateConfig } from './api/attestation-auth.js';
 import { readCheckpoint, safeTargetBlock } from './checkpoint.js';
 import { PgStore } from './database.js';
 import { RULE, logger } from './logger.js';
@@ -617,8 +619,25 @@ Options:
   }
 }
 
-async function cmdAttest(config: IndexerConfig): Promise<number> {
-  const argv = process.argv.slice(3);
+function sanitizeLogMessage(msg: string): string {
+  let cleaned = msg;
+  const privateKey = process.env['ATTESTER_PRIVATE_KEY'];
+  if (privateKey && privateKey.trim()) {
+    const trimmed = privateKey.trim();
+    cleaned = cleaned.replaceAll(trimmed, '[REDACTED]');
+    if (trimmed.startsWith('0x') && trimmed.length > 2) {
+      cleaned = cleaned.replaceAll(trimmed.slice(2), '[REDACTED]');
+    }
+  }
+  const secret = process.env['ATTESTATION_API_SECRET'];
+  if (secret && secret.trim()) {
+    cleaned = cleaned.replaceAll(secret.trim(), '[REDACTED]');
+  }
+  return cleaned;
+}
+
+export async function cmdAttest(config: IndexerConfig, argvOverride?: string[]): Promise<number> {
+  const argv = argvOverride ?? process.argv.slice(3);
   let assessmentId: string | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -636,9 +655,35 @@ Options:
     }
   }
 
+  // 1. Security gate: check ATTESTATION_ENABLED
+  const gateConfig = readAttestationGateConfig();
+  if (!gateConfig.enabled) {
+    logger.error('attestation is disabled: ATTESTATION_ENABLED must be set to "true"');
+    return 1;
+  }
+
+  // 2. Validate assessmentId parameter
   if (!assessmentId) {
     logger.error('missing required --id parameter');
     return 2;
+  }
+
+  if (!/^0x[0-9a-fA-F]{64}$/.test(assessmentId)) {
+    logger.error(`invalid assessment ID format: ${assessmentId}`);
+    return 2;
+  }
+
+  // 3. Validate required attestation configuration
+  const contractAddress = process.env['ATTESTATION_CONTRACT_ADDRESS'];
+  if (!contractAddress || !isAddress(contractAddress)) {
+    logger.error('missing or invalid ATTESTATION_CONTRACT_ADDRESS environment variable');
+    return 1;
+  }
+
+  const privateKey = process.env['ATTESTER_PRIVATE_KEY'];
+  if (!privateKey || privateKey.trim() === '') {
+    logger.error('missing required ATTESTER_PRIVATE_KEY environment variable');
+    return 1;
   }
 
   const store = await connectDatabase(config);
@@ -660,7 +705,7 @@ Options:
     ].join('\n'));
     return 0;
   } catch (err: unknown) {
-    logger.error(err instanceof Error ? err.message : String(err));
+    logger.error(sanitizeLogMessage(err instanceof Error ? err.message : String(err)));
     return 1;
   } finally {
     await store.close();
@@ -701,14 +746,16 @@ async function main(): Promise<number> {
     default:
       logger.error(`unknown command "${cmd}" (expected run | backfill | doctor | migrate | metrics | assess | serve | attest)`);
       return 2;
-  }
+    }
 }
 
-main().then(
-  (code) => process.exit(code),
-  (err: unknown) => {
-    logger.error('fatal', { error: err, transient: isTransientError(err) });
-    if (err instanceof Error && err.stack) console.error(err.stack);
-    process.exit(1);
-  },
-);
+if (!process.env['VITEST']) {
+  main().then(
+    (code) => process.exit(code),
+    (err: unknown) => {
+      logger.error('fatal', { error: err, transient: isTransientError(err) });
+      if (err instanceof Error && err.stack) console.error(err.stack);
+      process.exit(1);
+    },
+  );
+}

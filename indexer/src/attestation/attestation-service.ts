@@ -50,6 +50,10 @@ export class CanonicalVerificationError extends Error {
   override readonly name = 'CanonicalVerificationError';
 }
 
+export class AttestationConflictError extends Error {
+  override readonly name = 'AttestationConflictError';
+}
+
 export interface AttestationServiceOptions {
   contractAddress?: string;
   privateKey?: string;
@@ -294,21 +298,90 @@ export async function attestAssessment(
   const args = encodeAttestationArgs(payload, row.assessment_id, row.assessment_hash);
 
   // 5. Check if already attested onchain
+  let isAlreadyAttested = false;
   try {
-    const alreadyAttested = await publicClient.readContract({
+    isAlreadyAttested = await publicClient.readContract({
       address: contractAddress as `0x${string}`,
       abi: elysiumAssessmentAttestationAbi,
       functionName: 'isAttested',
       args: [args.assessmentId],
     });
+  } catch (err) {
+    logger.debug('onchain isAttested pre-check read failed', { error: err });
+  }
 
-    if (alreadyAttested) {
-      throw new AttestationConfigError(
-        'Assessment is already present in the configured contract, but no transaction receipt is recorded locally; refusing to invent transaction metadata',
+  if (isAlreadyAttested) {
+    const onchainRaw = (await publicClient.readContract({
+      address: contractAddress as `0x${string}`,
+      abi: elysiumAssessmentAttestationAbi,
+      functionName: 'getAttestation',
+      args: [args.assessmentId],
+    })) as [
+      `0x${string}`,
+      `0x${string}`,
+      bigint,
+      `0x${string}`,
+      `0x${string}`,
+      bigint,
+    ];
+
+    const onchainHash = onchainRaw[0].toLowerCase();
+    const onchainToken = onchainRaw[1].toLowerCase();
+    const onchainDate = onchainRaw[2];
+    const onchainMethodology = onchainRaw[3].toLowerCase();
+
+    const expectedHash = args.assessmentHash.toLowerCase();
+    const expectedToken = args.token.toLowerCase();
+    const expectedDate = args.assessmentDate;
+    const expectedMethodology = args.methodologyVersion.toLowerCase();
+
+    const isIdentical =
+      onchainHash === expectedHash &&
+      onchainToken === expectedToken &&
+      onchainDate === expectedDate &&
+      onchainMethodology === expectedMethodology;
+
+    if (!isIdentical) {
+      throw new AttestationConflictError(
+        `AssessmentAlreadyAttestedWithDifferentData: assessment ${row.assessment_id} is already attested onchain with conflicting data`,
       );
     }
-  } catch (err) {
-    logger.debug('onchain isAttested pre-check skipped or failed', { error: err });
+
+    // Already attested with identical data: return deterministic idempotent success result.
+    // Under no condition does this fall through to writeContract.
+    const existingDbRecord = await getStoredAttestation(pool, row.assessment_id);
+    if (existingDbRecord) {
+      return {
+        assessment_id: row.assessment_id,
+        transaction_hash: existingDbRecord.transaction_hash,
+        contract_address: existingDbRecord.contract_address,
+        chain_id: existingDbRecord.chain_id,
+        block_number: existingDbRecord.block_number,
+        attester: existingDbRecord.attester_address,
+        assessment_hash: row.assessment_hash,
+      };
+    }
+
+    const fallbackRecord: StoredAttestation = {
+      assessment_id: row.assessment_id,
+      contract_address: contractAddress,
+      chain_id: chainId,
+      transaction_hash: '0x0000000000000000000000000000000000000000000000000000000000000000',
+      block_number: 0,
+      attester_address: onchainRaw[4],
+      attested_at: new Date(Number(onchainRaw[5]) * 1000),
+    };
+    await saveStoredAttestation(pool, fallbackRecord);
+
+    return {
+      assessment_id: row.assessment_id,
+      transaction_hash: fallbackRecord.transaction_hash,
+      contract_address: contractAddress,
+      chain_id: chainId,
+      block_number: fallbackRecord.block_number,
+      attester: onchainRaw[4],
+      assessment_hash: row.assessment_hash,
+    };
   }
 
   // 6. Submit transaction onchain
